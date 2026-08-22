@@ -30,15 +30,22 @@ claude.ai/code/routines 에서 해당 라우틴의 프롬프트를 갱신하면 
 ## 2. 한국어 요약 후 텔레그램 발송
 - 선정한 3개 트렌드를 각각 2~3문장으로 한국어 요약한다. 번역투가 아니라 자연스러운
   한국어로 풀어써라.
-- 아래 형식으로 텔레그램 메시지를 구성해서 발송해라 (curl 사용, 봇 토큰/챗 ID는 아래 값 사용):
+- 메시지 본문(한글 포함)을 셸 명령 인자로 직접 넘기지 마라. 반드시 파일에 먼저
+  써서(Write 도구 등으로 UTF-8 저장) `scripts/send_telegram.sh` 에 stdin으로
+  전달해라. 셸 인자로 직접 넘기면 환경에 따라 한글이 깨질 수 있다.
 
-  BOT_TOKEN="{{TELEGRAM_BOT_TOKEN}}"
-  CHAT_ID="{{TELEGRAM_CHAT_ID}}"
+  1) 메시지 본문을 예: `/tmp/telegram_message.txt` 에 UTF-8로 저장한다.
+  2) 아래처럼 실행한다 (봇 토큰/챗 ID는 스크립트가 .env 또는 환경변수에서
+     읽지만, 클라우드에는 .env가 없으므로 직접 export 해준다):
 
-  curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-    -d chat_id="${CHAT_ID}" \
-    --data-urlencode text="<메시지 본문>" \
-    -d parse_mode="Markdown"
+  ```
+  export TELEGRAM_BOT_TOKEN="{{TELEGRAM_BOT_TOKEN}}"
+  export TELEGRAM_CHAT_ID="{{TELEGRAM_CHAT_ID}}"
+  bash scripts/send_telegram.sh < /tmp/telegram_message.txt
+  ```
+
+  3) 출력이 "텔레그램 전송 성공"인지 확인해라. 실패하면 이유를 기록하고 다음
+     단계로 계속 진행해라 (텔레그램 실패가 전체 파이프라인을 막으면 안 된다).
 
 - 메시지 본문 형식:
   ```
@@ -55,8 +62,6 @@ claude.ai/code/routines 에서 해당 라우틴의 프롬프트를 갱신하면 
 
   ✍️ 오늘 콘텐츠 주제: [3번에서 고른 주제 이름] — [한 줄 이유]
   ```
-- curl 응답의 "ok" 필드가 true인지 확인해라. 실패하면 이유를 기록하고 계속 진행해라
-  (텔레그램 실패가 전체 파이프라인을 막으면 안 된다).
 
 ## 3. 콘텐츠 주제 선정 및 초안 생성
 - 3개 트렌드 중 "30~50대 직장인 / 1인 사업가"에게 가장 공감될 만한 주제 1개를 골라라.
