@@ -1,11 +1,18 @@
 # 매일 아침 7시 라우틴 — 실제 실행 프롬프트
 
 이 파일은 클라우드 스케줄 라우틴(claude.ai/code/routines)에 등록된 프롬프트의 사본이다.
-실제 라우틴에는 아래 `{{TELEGRAM_BOT_TOKEN}}` / `{{TELEGRAM_CHAT_ID}}` 자리에 실제 값이
-들어가 있다 (보안을 위해 이 저장소 파일에는 플레이스홀더만 남겨둔다).
 
-라우틴 내용을 바꾸고 싶으면: 이 파일을 수정한 뒤, 실제 값을 채워서
+라우틴 내용을 바꾸고 싶으면: 이 파일을 수정한 뒤, 그대로 복사해서
 claude.ai/code/routines 에서 해당 라우틴의 프롬프트를 갱신하면 된다.
+
+## 왜 텔레그램을 curl로 직접 안 보내나
+
+클라우드 라우틴이 실행되는 샌드박스는 보안 정책상 `api.telegram.org` 같은 임의의
+외부 API로 직접 나가는 네트워크 요청을 차단한다 (실측 확인됨: `gateway answered 403
+to CONNECT ... host: api.telegram.org`). 그래서 이 파이프라인은 텔레그램 전송을
+직접 하지 않고, **`content/trends/YYYY-MM-DD.md` 파일을 커밋 & 푸시하면 GitHub
+Actions(`.github/workflows/send-telegram.yml`)가 그 파일을 읽어서 텔레그램으로
+보내는 구조**로 우회한다. GitHub Actions 러너는 인터넷 제한이 없다.
 
 ---
 
@@ -27,27 +34,15 @@ claude.ai/code/routines 에서 해당 라우틴의 프롬프트를 갱신하면 
 - 조회수/댓글수/공유 반응이 뜨거운 것, 여러 소스에서 동시에 언급되는 것을 우선한다.
 - 가장 핫한 트렌드 3개를 선정해라. 각각 원문 출처(링크)도 함께 기록해둔다.
 
-## 2. 한국어 요약 후 텔레그램 발송
+## 2. 한국어 요약을 트렌드 파일로 저장
+- 텔레그램 API를 직접 호출하려고 시도하지 마라 (클라우드 샌드박스 네트워크 정책으로
+  차단되어 항상 실패한다). 대신 아래 형식 그대로 `content/trends/YYYY-MM-DD.md`
+  파일을 만들어라. 이 파일이 커밋되어 푸시되면 GitHub Actions가 자동으로 텔레그램
+  전송을 처리한다.
 - 선정한 3개 트렌드를 각각 2~3문장으로 한국어 요약한다. 번역투가 아니라 자연스러운
   한국어로 풀어써라.
-- 메시지 본문(한글 포함)을 셸 명령 인자로 직접 넘기지 마라. 반드시 파일에 먼저
-  써서(Write 도구 등으로 UTF-8 저장) `scripts/send_telegram.sh` 에 stdin으로
-  전달해라. 셸 인자로 직접 넘기면 환경에 따라 한글이 깨질 수 있다.
 
-  1) 메시지 본문을 예: `/tmp/telegram_message.txt` 에 UTF-8로 저장한다.
-  2) 아래처럼 실행한다 (봇 토큰/챗 ID는 스크립트가 .env 또는 환경변수에서
-     읽지만, 클라우드에는 .env가 없으므로 직접 export 해준다):
-
-  ```
-  export TELEGRAM_BOT_TOKEN="{{TELEGRAM_BOT_TOKEN}}"
-  export TELEGRAM_CHAT_ID="{{TELEGRAM_CHAT_ID}}"
-  bash scripts/send_telegram.sh < /tmp/telegram_message.txt
-  ```
-
-  3) 출력이 "텔레그램 전송 성공"인지 확인해라. 실패하면 이유를 기록하고 다음
-     단계로 계속 진행해라 (텔레그램 실패가 전체 파이프라인을 막으면 안 된다).
-
-- 메시지 본문 형식:
+- `content/trends/YYYY-MM-DD.md` 파일 형식 (텔레그램 메시지 본문 그대로):
   ```
   🤖 오늘의 AI 트렌드 (YYYY-MM-DD)
 
@@ -68,17 +63,18 @@ claude.ai/code/routines 에서 해당 라우틴의 프롬프트를 갱신하면 
   판단 기준: 업무/생업에 바로 적용 가능한가, 비용이나 시간 절약과 관련 있는가,
   전문 지식 없이도 이해할 수 있는가.
 - 저장소 루트 CLAUDE.md의 문체 규칙에 따라 아래 세 파일을 오늘 날짜로 생성해라
-  (파일이 이미 있으면 덮어쓰지 말고 스킵하고 텔레그램으로 알려라):
+  (파일이 이미 있으면 덮어쓰지 말고 스킵해라):
   - content/blog/YYYY-MM-DD.md
   - content/instagram/YYYY-MM-DD.md  (본문 300자 이내 + 해시태그 정확히 5개)
   - content/x/YYYY-MM-DD.md          (280자 이내)
 
 ## 4. 커밋 & 푸시
-- git add content/blog content/instagram content/x
+- git add content/trends content/blog content/instagram content/x
 - 커밋 메시지: "content: YYYY-MM-DD 트렌드 콘텐츠 자동 생성 ([선정 주제])"
-- 현재 브랜치에 푸시해라.
+- 현재 브랜치에 푸시해라. (이 푸시가 성공해야 GitHub Actions가 텔레그램을 보낸다 —
+  푸시가 실패하면 텔레그램도 안 간다는 뜻이니 반드시 성공 여부를 확인해라.)
 
 ## 5. 마무리
-- 무언가 실패했다면(트렌드를 못 찾음, 텔레그램 실패, 파일 생성 실패 등) 무엇이 왜
+- 무언가 실패했다면(트렌드를 못 찾음, 파일 생성 실패, 푸시 실패 등) 무엇이 왜
   실패했는지 결과에 명확히 남겨라. 절대 실패를 숨기고 성공한 것처럼 보고하지 마라.
 ```

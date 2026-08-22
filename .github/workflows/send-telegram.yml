@@ -1,0 +1,70 @@
+name: Send Telegram Trend Summary
+
+# 클라우드 라우틴(Claude)이 content/trends/YYYY-MM-DD.md 파일을 새로 커밋해서
+# push하면 자동으로 실행되어, 그 파일 내용을 텔레그램으로 보낸다.
+#
+# 텔레그램 API를 클라우드 라우틴(Claude 실행 환경)에서 직접 호출하면 네트워크
+# 정책 때문에 막히기 때문에, 인터넷 제한이 없는 GitHub Actions 러너를 거쳐서
+# 보내는 구조다.
+#
+# 필요한 저장소 시크릿 (Settings > Secrets and variables > Actions):
+#   - TELEGRAM_BOT_TOKEN
+#   - TELEGRAM_CHAT_ID
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "content/trends/**.md"
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Find changed trend file
+        id: find_file
+        run: |
+          set -euo pipefail
+          FILE=$(git diff --name-only HEAD~1 HEAD -- 'content/trends/*.md' | tail -n1)
+          if [[ -z "$FILE" ]]; then
+            echo "No trend file changed in this push; nothing to send."
+            echo "file=" >> "$GITHUB_OUTPUT"
+          else
+            echo "Found changed file: $FILE"
+            echo "file=$FILE" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Send to Telegram
+        if: steps.find_file.outputs.file != ''
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TREND_FILE: ${{ steps.find_file.outputs.file }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+            echo "::error::TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID secret이 설정되어 있지 않습니다."
+            echo "저장소 Settings > Secrets and variables > Actions 에서 등록해주세요."
+            exit 1
+          fi
+
+          RESPONSE=$(curl -sS -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode text@"${TREND_FILE}" \
+            -d parse_mode="Markdown")
+
+          echo "$RESPONSE"
+          OK=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok'))")
+
+          if [[ "$OK" != "True" ]]; then
+            echo "::error::텔레그램 전송 실패"
+            exit 1
+          fi
+
+          echo "텔레그램 전송 성공"

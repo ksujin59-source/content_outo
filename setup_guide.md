@@ -7,8 +7,9 @@
 1. 텔레그램에서 "봇"을 하나 만든다 (봇 = 메시지를 자동으로 보내는 계정)
 2. 봇의 "토큰"(비밀번호 같은 것)을 받는다
 3. 메시지를 받을 내 채팅방의 "chat id"(번호표 같은 것)를 알아낸다
-4. 이 두 값을 `.env` 파일에 적어 넣는다
+4. 이 두 값을 `.env` 파일에 적어 넣는다 (내 컴퓨터에서 테스트용)
 5. 잘 작동하는지 테스트한다
+6. 같은 두 값을 GitHub Secrets에도 등록한다 (매일 자동 발송용)
 
 ---
 
@@ -151,19 +152,36 @@ https://api.telegram.org/bot<봇토큰>/sendMessage?chat_id=<chat id>&text=테�
 
 ---
 
-## 6단계. 클라우드 자동화(매일 아침 7시 실행) 연결
+## 6단계. GitHub Actions에 토큰 등록하기 (매일 자동 발송용)
 
-로컬 `.env` 파일은 내 컴퓨터에서 직접 테스트할 때만 쓰입니다. 매일 아침 7시에
-자동으로 실행되는 부분은 **클라우드**(Anthropic 서버)에서 돌아가기 때문에, 내 컴퓨터의
-`.env` 파일을 읽을 수 없습니다. 그래서 위에서 확인한 **봇 토큰**과 **chat id** 두 값을
-클라우드 라우틴 설정에도 한 번 더 등록해야 합니다 — 이 부분은 Claude가 라우틴을 만들 때
-같이 처리해줍니다. (`https://claude.ai/code/routines` 에서 라우틴 목록과 실행 기록을
-확인할 수 있습니다.)
+매일 아침 7시 자동 실행은 **클라우드**(Anthropic 서버)에서 트렌드를 찾고 글을 쓰지만,
+그 클라우드 서버는 보안 정책상 텔레그램으로 직접 메시지를 보낼 수 없습니다. 그래서 이
+프로젝트는 클라우드가 `content/trends/` 폴더에 글을 써서 GitHub에 올리면,
+**GitHub Actions**(GitHub 자체 자동화 서버, 인터넷 제한 없음)가 그 글을 읽어서
+텔레그램으로 대신 보내주는 구조로 되어 있습니다 (`.github/workflows/send-telegram.yml`).
+
+이 GitHub Actions가 텔레그램에 보내려면, 봇 토큰과 chat id를 **GitHub 저장소의
+Secrets**(암호로 저장되는 비밀값 보관함)에 등록해야 합니다.
+
+1. 브라우저에서 저장소 페이지로 이동합니다: `https://github.com/ksujin59-source/content_outo`
+2. 상단 **Settings** 탭 클릭
+3. 왼쪽 메뉴에서 **Secrets and variables** → **Actions** 클릭
+4. **New repository secret** 버튼 클릭
+5. Name에 `TELEGRAM_BOT_TOKEN` 입력, Secret 칸에 1단계에서 받은 봇 토큰 붙여넣기 → **Add secret**
+6. 다시 **New repository secret** 클릭 → Name에 `TELEGRAM_CHAT_ID` 입력, Secret 칸에
+   3단계에서 찾은 chat id 붙여넣기 → **Add secret**
+
+두 개의 Secret이 목록에 보이면 완료입니다 (값 자체는 등록 후 다시 볼 수 없습니다 —
+정상입니다, 보안을 위한 설계입니다).
+
+## 7단계. 클라우드 라우틴 확인
 
 라우틴이 잘 실행되고 있는지 확인하려면:
 1. `https://claude.ai/code/routines` 접속
 2. 라우틴 이름을 클릭 → 실행 기록(run) 목록 확인
-3. 매일 아침 텔레그램으로 메시지가 오는지, `content/blog` 폴더에 새 파일이 쌓이는지 확인
+3. 저장소의 **Actions** 탭(`https://github.com/ksujin59-source/content_outo/actions`)에서
+   "Send Telegram Trend Summary" 워크플로우가 실행됐는지 확인
+4. 매일 아침 텔레그램으로 메시지가 오는지, `content/blog` 폴더에 새 파일이 쌓이는지 확인
 
 ---
 
