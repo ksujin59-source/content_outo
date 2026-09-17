@@ -1,4 +1,5 @@
-"""텔레그램으로 들어온 매매/공모주 기록 메시지를 파싱해서 구글시트에 반영한다.
+"""텔레그램으로 들어온 매매/공모주/이유식 기록 메시지를 파싱해서 구글시트(+캘린더)에
+반영한다.
 
 지원하는 메시지 형식:
   - 매매: "매수 삼성전자 미래에셋 10 71000 반도체 업황 회복 기대" / "매도 AAPL 토스증권 5 190.5"
@@ -12,11 +13,17 @@
   - 공모주 매도(직접 지정): "공모매도 바로팜 수진 시초가" 또는 "공모매도 바로팜 수진
     미래에셋 25000" (종목명 신청인 [증권사] 매도가|시초가 — 증권사는 동일인이 여러
     증권사로 청약해 모호할 때만 필요). 알림에 답장하기 애매할 때 쓰는 방식.
+  - 이유식 기록: "이유식 고구마, 소고기" (접두어 "이유식" + 쉼표/줄바꿈/·//로 구분한
+    음식 목록). 알레르기 테스트용으로 날짜별 구글 캘린더 이벤트(하루 1개로 누적)와
+    시트(이유식기록 탭)에 기록한다. 매매 형식과 겹치지 않도록 "이유식" 접두어로 구분한다
+    — 이 접두어 없이 보내면 매매 형식 파싱에 실패해 사용법 안내만 돌아간다.
 
-이 세 종류 모두 같은 텔레그램 봇(STOCK_TELEGRAM_BOT_TOKEN)의 getUpdates를 공유하므로,
+이 네 종류 모두 같은 텔레그램 봇(STOCK_TELEGRAM_BOT_TOKEN)의 getUpdates를 공유하므로,
 반드시 이 파일 하나의 폴링 루프 안에서 처리해야 한다 — getUpdates는 offset을 넘기면
 그 이전 업데이트를 다른 호출자에게 다시 돌려주지 않으므로, 별도 스크립트로 나누면
-서로의 메시지를 가로채 유실시킨다.
+서로의 메시지를 가로채 유실시킨다. (이유식 기록도 원래는 전용 봇을 새로 만들 계획이었으나,
+봇 발급 절차를 줄이기 위해 이 주식봇 챗을 그대로 재사용하기로 함 — 그래서 "이유식" 접두어로
+매매 메시지와 구분한다.)
 
 GitHub Actions cron(process-trades.yml)이 주기 실행하는 것을 전제로 한다. 로컬 실행 시엔
 같은 폴더의 .env를 자동으로 읽는다 (없으면 무시하고 이미 설정된 환경변수를 그대로 씀).
@@ -28,29 +35,66 @@ import datetime as dt
 import os
 import re
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
+import calendar_client
 import price_lookup
 import sheets_client
 import telegram_client
 
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
+SEOUL = ZoneInfo("Asia/Seoul")
 TICKER_MAP_PATH = Path(__file__).parent / "kr_ticker_map.json"
 TRADE_RE = re.compile(r"^(매수|매도)\s+(\S+)\s+(\S+)\s+(\d+)\s+([\d.]+)(?:\s+(.+))?$")
 IPO_APPLY_RE = re.compile(r"^청약\s+(\S+)\s+(\S+)\s+(\S+)\s+(\d+)\s+([\d.]+)$")
 IPO_SELL_PREFIX_RE = re.compile(r"^공모매도\s+(.+)$")
 IPO_REPLY_SELL_RE = re.compile(r"^(\S+)\s+(\d+)\s+(시초가|[\d.]+)$")
 IPO_ALERT_NAME_RE = re.compile(r"(?:오늘|내일) (\S+) 상장")
+FOOD_RE = re.compile(r"^이유식\s+(.+)$", re.DOTALL)
+FOOD_SEPARATOR_RE = re.compile(r"[,\n·/]+")
 
 USAGE_HINT = (
     "형식을 인식하지 못했습니다.\n"
     "매매: `매수 삼성전자 미래에셋 10 71000 [메모]` / `매도 AAPL 토스증권 5 190.5`\n"
     "공모주 청약: `청약 바로팜 미래에셋 수진 10 18000`\n"
     "공모주 매도: 상장일 알림에 답장으로 `수진 10 시초가`, 또는 직접\n"
-    "`공모매도 바로팜 수진 시초가`"
+    "`공모매도 바로팜 수진 시초가`\n"
+    "이유식 기록: `이유식 고구마, 소고기`"
 )
+
+
+def _parse_food_items(text: str) -> list[str]:
+    parts = FOOD_SEPARATOR_RE.split(text)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _dedupe_keep_order(items: list[str]) -> list[str]:
+    seen: dict[str, None] = {}
+    for item in items:
+        seen.setdefault(item, None)
+    return list(seen.keys())
+
+
+def _handle_food_log(ws_food, food_calendar_id: str, message: dict, food_text: str, raw_text: str) -> None:
+    items = _parse_food_items(food_text)
+    if not items:
+        telegram_client.send_message(USAGE_HINT)
+        return
+
+    msg_dt = dt.datetime.fromtimestamp(message["date"], tz=SEOUL)
+    date_str = msg_dt.date().isoformat()
+    time_str = msg_dt.strftime("%H:%M")
+
+    for item in items:
+        ws_food.append_row([date_str, time_str, item, raw_text])
+
+    unique_items = _dedupe_keep_order(items)
+    calendar_client.upsert_event(food_calendar_id, date_str, unique_items, time_str)
+
+    telegram_client.send_message(f"✅ {date_str} 이유식 기록 완료: {', '.join(unique_items)}")
 
 
 def _parse_ipo_sell(text: str) -> tuple[str, str, str | None, str] | None:
@@ -104,7 +148,7 @@ def _apply_trade_to_holdings(ws, market: str, symbol: str, code: str, broker: st
     return new_qty, new_avg
 
 
-def _handle_ipo_apply(ws_apply, ws_calendar, today: str, match: re.Match) -> None:
+def _handle_ipo_apply(ws_apply, ws_calendar, stock_calendar_id: str, today: str, match: re.Match) -> None:
     name, broker, applicant, qty_str, price_str = match.groups()
     qty = int(qty_str)
     price = float(price_str)
@@ -116,6 +160,7 @@ def _handle_ipo_apply(ws_apply, ws_calendar, today: str, match: re.Match) -> Non
             break
 
     ws_apply.append_row([today, name, broker, applicant, qty, price, listing_date, "대기", "", "", ""])
+    calendar_client.create_event(stock_calendar_id, today, f"[청약] {name} {price:,.0f}원")
 
     reply = f"✅ {name} 청약 기록 완료\n{broker} · {applicant} · {qty}주 @{price:,.0f}"
     reply += f"\n상장예정일 {listing_date}" if listing_date else "\n상장예정일 미정 (확정되면 자동 반영됨)"
@@ -131,7 +176,7 @@ def _find_ipo_sell_candidates(ws_apply, name: str, applicant: str, broker: str |
     ]
 
 
-def _finalize_ipo_sale(ws_apply, row_idx, row, today: str, price_token: str, expected_qty: int | None = None) -> None:
+def _finalize_ipo_sale(ws_apply, stock_calendar_id: str, row_idx, row, today: str, price_token: str, expected_qty: int | None = None) -> None:
     name = row[1]
     apply_qty = int(row[4])
     apply_price = float(row[5])
@@ -147,7 +192,12 @@ def _finalize_ipo_sale(ws_apply, row_idx, row, today: str, price_token: str, exp
         sell_price = float(price_token)
 
     profit_pct = (sell_price - apply_price) / apply_price * 100 if apply_price else 0.0
+    profit_amount = (sell_price - apply_price) * apply_qty
     ws_apply.update(f"H{row_idx}:K{row_idx}", [["매도완료", f"{sell_price:.2f}", today, f"{profit_pct:.2f}"]])
+    calendar_client.create_event(
+        stock_calendar_id, today, f"[상장] {name} {apply_qty}주 {sell_price:,.0f}원",
+        f"수익 {profit_amount:,.0f}원 ({profit_pct:+.1f}%)",
+    )
 
     reply = f"✅ {name} 매도완료 · {sell_price:,.0f}원\n수익률 {profit_pct:+.1f}%"
     if expected_qty is not None and expected_qty != apply_qty:
@@ -155,7 +205,7 @@ def _finalize_ipo_sale(ws_apply, row_idx, row, today: str, price_token: str, exp
     telegram_client.send_message(reply)
 
 
-def _handle_ipo_sell(ws_apply, today: str, name: str, applicant: str, broker: str | None, price_token: str) -> None:
+def _handle_ipo_sell(ws_apply, stock_calendar_id: str, today: str, name: str, applicant: str, broker: str | None, price_token: str) -> None:
     candidates = _find_ipo_sell_candidates(ws_apply, name, applicant, broker)
 
     if not candidates:
@@ -170,10 +220,10 @@ def _handle_ipo_sell(ws_apply, today: str, name: str, applicant: str, broker: st
         return
 
     row_idx, row = candidates[0]
-    _finalize_ipo_sale(ws_apply, row_idx, row, today, price_token)
+    _finalize_ipo_sale(ws_apply, stock_calendar_id, row_idx, row, today, price_token)
 
 
-def _handle_ipo_sell_reply(ws_apply, today: str, name: str, applicant: str, qty: int, price_token: str) -> None:
+def _handle_ipo_sell_reply(ws_apply, stock_calendar_id: str, today: str, name: str, applicant: str, qty: int, price_token: str) -> None:
     candidates = _find_ipo_sell_candidates(ws_apply, name, applicant, None)
 
     if not candidates:
@@ -188,7 +238,7 @@ def _handle_ipo_sell_reply(ws_apply, today: str, name: str, applicant: str, qty:
         return
 
     row_idx, row = candidates[0]
-    _finalize_ipo_sale(ws_apply, row_idx, row, today, price_token, expected_qty=qty)
+    _finalize_ipo_sale(ws_apply, stock_calendar_id, row_idx, row, today, price_token, expected_qty=qty)
 
 
 def main() -> None:
@@ -198,6 +248,7 @@ def main() -> None:
     ws_state = sheets_client.get_or_create_worksheet(spreadsheet, "상태")
     ws_ipo_apply = sheets_client.get_or_create_worksheet(spreadsheet, "공모주신청")
     ws_ipo_calendar = sheets_client.get_or_create_worksheet(spreadsheet, "공모주캘린더")
+    ws_food = sheets_client.get_or_create_worksheet(spreadsheet, "이유식기록")
 
     last_update_id = int(sheets_client.get_state(ws_state, "last_update_id", "0") or "0")
     updates = telegram_client.get_updates(offset=last_update_id + 1)
@@ -207,6 +258,8 @@ def main() -> None:
         return
 
     configured_chat_id = os.environ.get("STOCK_TELEGRAM_CHAT_ID", "")
+    food_calendar_id = os.environ.get("FOOD_GOOGLE_CALENDAR_ID", "")
+    stock_calendar_id = os.environ.get("STOCK_GOOGLE_CALENDAR_ID", "")
     max_update_id = last_update_id
     today = dt.date.today().isoformat()
 
@@ -220,13 +273,18 @@ def main() -> None:
 
         text = message["text"].strip()
 
+        food_match = FOOD_RE.match(text)
+        if food_match:
+            _handle_food_log(ws_food, food_calendar_id, message, food_match.group(1), text)
+            continue
+
         reply_to = message.get("reply_to_message") or {}
         alert_name_match = IPO_ALERT_NAME_RE.search(reply_to.get("text", ""))
         reply_sell_match = IPO_REPLY_SELL_RE.match(text) if alert_name_match else None
 
         if reply_sell_match:
             applicant, qty_str, price_token = reply_sell_match.groups()
-            _handle_ipo_sell_reply(ws_ipo_apply, today, alert_name_match.group(1), applicant, int(qty_str), price_token)
+            _handle_ipo_sell_reply(ws_ipo_apply, stock_calendar_id, today, alert_name_match.group(1), applicant, int(qty_str), price_token)
             continue
 
         match = TRADE_RE.match(text)
@@ -234,10 +292,10 @@ def main() -> None:
         ipo_sell_parsed = _parse_ipo_sell(text) if not match and not ipo_apply_match else None
 
         if ipo_apply_match:
-            _handle_ipo_apply(ws_ipo_apply, ws_ipo_calendar, today, ipo_apply_match)
+            _handle_ipo_apply(ws_ipo_apply, ws_ipo_calendar, stock_calendar_id, today, ipo_apply_match)
             continue
         if ipo_sell_parsed:
-            _handle_ipo_sell(ws_ipo_apply, today, *ipo_sell_parsed)
+            _handle_ipo_sell(ws_ipo_apply, stock_calendar_id, today, *ipo_sell_parsed)
             continue
         if not match:
             telegram_client.send_message(USAGE_HINT)
@@ -260,6 +318,10 @@ def main() -> None:
 
         ws_trades.append_row([today, market, symbol, broker, action, qty, price, memo])
         new_qty, new_avg = _apply_trade_to_holdings(ws_holdings, market, symbol, code, broker, action, qty, price)
+        calendar_client.create_event(
+            stock_calendar_id, today, f"[{action}] {symbol} {qty}주 {price:,.0f}원",
+            f"총 수량 {new_qty}주, 평단가 {new_avg:,.0f}원",
+        )
 
         if new_qty > 0:
             reply = (

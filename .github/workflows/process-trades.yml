@@ -1,13 +1,16 @@
 name: Process Stock Trades
 
-# 텔레그램으로 들어온 매매 기록 메시지("매수 삼성전자 10 71000" 형식)를 10분마다 폴링해서
-# 구글시트(거래내역/보유종목)에 자동 반영한다.
+# 텔레그램으로 들어온 매매/청약/공모매도 기록 메시지와 이유식 기록 메시지("이유식 고구마,
+# 소고기" 형식)를 10분마다 폴링해서 구글시트(거래내역/보유종목/공모주신청/이유식기록)와
+# 구글 캘린더(이유식 기록 전용 + 주식&공모주 기록 전용, 서로 다른 캘린더)에 자동 반영한다.
 #
 # 필요한 저장소 시크릿 (Settings > Secrets and variables > Actions):
-#   - STOCK_TELEGRAM_BOT_TOKEN  (주식 기록 전용 봇 — 트렌드 알림 봇과 별개)
+#   - STOCK_TELEGRAM_BOT_TOKEN  (주식·이유식 기록 공용 봇 — 트렌드 알림 봇과 별개)
 #   - STOCK_TELEGRAM_CHAT_ID
 #   - GOOGLE_SERVICE_ACCOUNT_JSON  (구글 서비스 계정 키 JSON 전체)
 #   - GOOGLE_SHEET_ID
+#   - FOOD_GOOGLE_CALENDAR_ID   (이유식 기록 전용 캘린더 ID)
+#   - STOCK_GOOGLE_CALENDAR_ID  (매매/청약/상장 기록 전용 캘린더 ID — 기존 "주식&공모주" 캘린더)
 
 on:
   schedule:
@@ -38,6 +41,8 @@ jobs:
           STOCK_TELEGRAM_CHAT_ID: ${{ secrets.STOCK_TELEGRAM_CHAT_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          FOOD_GOOGLE_CALENDAR_ID: ${{ secrets.FOOD_GOOGLE_CALENDAR_ID }}
+          STOCK_GOOGLE_CALENDAR_ID: ${{ secrets.STOCK_GOOGLE_CALENDAR_ID }}
         run: python scripts/stock/process_trades.py
 
       - name: Commit ticker map cache if changed
