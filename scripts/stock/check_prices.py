@@ -43,13 +43,13 @@ def _us_market_open(now_et: dt.datetime) -> bool:
 def _load_holdings(ws) -> list[dict]:
     holdings = []
     for row in ws.get_all_values()[1:]:
-        if len(row) < 4:
+        if len(row) < 5:
             continue
-        market, name, code = row[0], row[1], row[2]
-        qty = int(row[3]) if row[3] else 0
+        market, name, code, broker = row[0], row[1], row[2], row[3]
+        qty = int(row[4]) if row[4] else 0
         if qty <= 0 or not code:
             continue
-        holdings.append({"market": market, "name": name, "code": code, "qty": qty})
+        holdings.append({"market": market, "name": name, "code": code, "broker": broker, "qty": qty})
     return holdings
 
 
@@ -80,11 +80,11 @@ def main() -> None:
 
     if args.force_alert:
         holdings = [h for h in holdings if h["name"] == args.force_alert] or [
-            {"market": "국내", "name": args.force_alert, "code": args.force_alert, "qty": 0}
+            {"market": "국내", "name": args.force_alert, "code": args.force_alert, "broker": "", "qty": 0}
         ]
 
     for holding in holdings:
-        market, name, code = holding["market"], holding["name"], holding["code"]
+        market, name, code, broker = holding["market"], holding["name"], holding["code"], holding["broker"]
 
         if not args.force_alert:
             is_open = _kr_market_open(now_kst) if market == "국내" else _us_market_open(now_et)
@@ -92,7 +92,7 @@ def main() -> None:
                 continue
 
         quote = price_lookup.fetch_kr_quote(code) if market == "국내" else price_lookup.fetch_us_quote(code)
-        print(f"{market} {name}({code}): {quote.price:,.2f} ({quote.pct_change:+.2f}%)")
+        print(f"{market} {name}({code}, {broker}): {quote.price:,.2f} ({quote.pct_change:+.2f}%)")
 
         breached = abs(quote.pct_change) >= THRESHOLD_PCT
         if not (breached or args.force_alert):
