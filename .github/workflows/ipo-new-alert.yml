@@ -1,0 +1,35 @@
+name: IPO New Listing Alert
+
+# 38.co.kr 공모주 청약일정을 하루 3번(평일 09/13/18시 KST) 확인해서, 새로 청약 가능해진
+# 공모주가 있으면 공모주캘린더 탭에 기록하고 텔레그램으로 알린다.
+#
+# 필요한 저장소 시크릿은 process-trades.yml / price-alert.yml과 동일 (STOCK_TELEGRAM_*,
+# GOOGLE_*) — 이미 등록되어 있다면 추가 등록 불필요.
+
+on:
+  schedule:
+    - cron: "0 0,4,9 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check for new IPOs
+        env:
+          STOCK_TELEGRAM_BOT_TOKEN: ${{ secrets.STOCK_TELEGRAM_BOT_TOKEN }}
+          STOCK_TELEGRAM_CHAT_ID: ${{ secrets.STOCK_TELEGRAM_CHAT_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+        run: python scripts/stock/ipo_new_alert.py

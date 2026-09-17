@@ -1,0 +1,40 @@
+name: IPO Listing Day Reminder
+
+# 공모주 상장일 매도 리마인더 — 상장 전날 저녁(20:00~20:30 KST)과 상장 당일 아침
+# (08:20~08:40 KST) 두 번, 아직 매도하지 않은(상태=대기) 신청 건에 대해 텔레그램으로 알린다.
+#
+# cron의 두 스케줄은 같은 KST 시각을 겨냥하지만 UTC 기준 요일이 하루씩 어긋난다는 점을
+# 주의해야 한다 (KST가 UTC+9라 자정을 넘어가는 경우가 있음):
+#   - "*/10 11 * * 1-5"  → UTC 월~금 11:00대 = KST 월~금 20:00대 (같은 날짜라 그대로 매핑)
+#   - "*/10 23 * * 0-4"  → UTC 일~목 23:00대 = KST 월~금 08:00대 (UTC 요일이 하루 당겨짐)
+#
+# 필요한 저장소 시크릿은 다른 stock 워크플로우와 동일 (STOCK_TELEGRAM_*, GOOGLE_*).
+
+on:
+  schedule:
+    - cron: "*/10 11 * * 1-5"
+    - cron: "*/10 23 * * 0-4"
+  workflow_dispatch:
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check listing-day reminders
+        env:
+          STOCK_TELEGRAM_BOT_TOKEN: ${{ secrets.STOCK_TELEGRAM_BOT_TOKEN }}
+          STOCK_TELEGRAM_CHAT_ID: ${{ secrets.STOCK_TELEGRAM_CHAT_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+        run: python scripts/stock/ipo_listing_alert.py

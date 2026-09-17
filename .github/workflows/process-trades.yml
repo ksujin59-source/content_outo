@@ -1,0 +1,52 @@
+name: Process Stock Trades
+
+# 텔레그램으로 들어온 매매 기록 메시지("매수 삼성전자 10 71000" 형식)를 10분마다 폴링해서
+# 구글시트(거래내역/보유종목)에 자동 반영한다.
+#
+# 필요한 저장소 시크릿 (Settings > Secrets and variables > Actions):
+#   - STOCK_TELEGRAM_BOT_TOKEN  (주식 기록 전용 봇 — 트렌드 알림 봇과 별개)
+#   - STOCK_TELEGRAM_CHAT_ID
+#   - GOOGLE_SERVICE_ACCOUNT_JSON  (구글 서비스 계정 키 JSON 전체)
+#   - GOOGLE_SHEET_ID
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Process trades
+        env:
+          STOCK_TELEGRAM_BOT_TOKEN: ${{ secrets.STOCK_TELEGRAM_BOT_TOKEN }}
+          STOCK_TELEGRAM_CHAT_ID: ${{ secrets.STOCK_TELEGRAM_CHAT_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+        run: python scripts/stock/process_trades.py
+
+      - name: Commit ticker map cache if changed
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet -- scripts/stock/kr_ticker_map.json; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add scripts/stock/kr_ticker_map.json
+            git commit -m "chore: 국내 종목코드 캐시 갱신"
+            git push
+          fi

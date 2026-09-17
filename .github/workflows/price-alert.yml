@@ -1,0 +1,42 @@
+name: Stock Price Alert
+
+# 보유 종목(국내+해외) 시세를 장중 30분 간격으로 확인해서, 전일 종가 대비 ±7% 이상
+# 변동한 종목이 있으면 텔레그램으로 알림을 보낸다.
+#
+# cron은 한국(09:00~15:30 KST)과 미국(09:30~16:00 ET, 서머타임 포함) 장 시간을 넉넉히
+# 포괄하는 UTC 0~21시 구간(평일)으로 느슨하게 걸어두고, 실제 개장 여부는
+# scripts/stock/check_prices.py가 종목별 시장 기준으로 정확히 판단한다.
+#
+# 필요한 저장소 시크릿 (Settings > Secrets and variables > Actions):
+#   - STOCK_TELEGRAM_BOT_TOKEN  (주식 기록 전용 봇 — 트렌드 알림 봇과 별개)
+#   - STOCK_TELEGRAM_CHAT_ID
+#   - GOOGLE_SERVICE_ACCOUNT_JSON  (구글 서비스 계정 키 JSON 전체)
+#   - GOOGLE_SHEET_ID
+
+on:
+  schedule:
+    - cron: "*/30 0-21 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check prices
+        env:
+          STOCK_TELEGRAM_BOT_TOKEN: ${{ secrets.STOCK_TELEGRAM_BOT_TOKEN }}
+          STOCK_TELEGRAM_CHAT_ID: ${{ secrets.STOCK_TELEGRAM_CHAT_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+        run: python scripts/stock/check_prices.py
