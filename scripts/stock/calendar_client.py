@@ -24,6 +24,10 @@ process_trades.py의 모듈 docstring에 이 제약이 설명되어 있다).
   - `create_event`: 주식 매매/공모주 청약·상장 기록용 — 거래 건당 독립된 이벤트를 새로
     만든다 (병합하지 않음). id를 지정하지 않고 생성하므로 같은 날 여러 건이어도 서로
     충돌하지 않는다.
+  - `upsert_simple_event`: 공모주 청약/상장 "일정" 동기화용 — 내가 한 행동이 아니라
+    38.co.kr에서 긁어온, 이미 확정된 시장 일정을 캘린더에 반영한다. 호출부(ipo_new_alert.py)가
+    공모주 번호(no)로 결정론적 id를 만들어 넘기므로, 스크래핑할 때마다 다시 불러도
+    같은 이벤트를 덮어쓸 뿐 중복 생성되지 않는다.
 """
 
 from __future__ import annotations
@@ -114,6 +118,7 @@ def upsert_event(calendar_id: str, date_str: str, items: list[str], time_str: st
     if existing is None:
         body = {
             "id": event_id,
+            "status": "confirmed",
             "summary": FOOD_LOG_PREFIX + ", ".join(items),
             "description": new_line,
             "start": {"date": date_str},
@@ -125,6 +130,15 @@ def upsert_event(calendar_id: str, date_str: str, items: list[str], time_str: st
             json=body,
             timeout=10,
         )
+        if resp.status_code == 409:
+            # 같은 id로 이전에 삭제(취소)된 이벤트가 남아있으면 새로 만들 수 없다 —
+            # 그 자리를 PATCH로 되살린다(status를 confirmed로 되돌리며 내용도 채움).
+            resp = requests.patch(
+                f"{API_BASE}/calendars/{calendar_id}/events/{event_id}",
+                headers=headers,
+                json=body,
+                timeout=10,
+            )
         resp.raise_for_status()
         return
 
@@ -169,4 +183,31 @@ def create_event(calendar_id: str, date_str: str, summary: str, description: str
         json=body,
         timeout=10,
     )
+    resp.raise_for_status()
+
+
+def upsert_simple_event(calendar_id: str, event_id: str, summary: str, start_date: str, end_date: str) -> None:
+    """공모주 청약/상장 "일정"(내가 한 행동이 아니라 시장에 이미 확정된 일정) 동기화용.
+
+    event_id로 존재 여부를 판단해 있으면 최신 정보로 덮어쓰고(PATCH), 없으면 그
+    id로 새로 만든다(POST) — 같은 공모주를 매번 다시 동기화해도 중복 생성되지 않는다.
+    end_date는 종료일 "다음날"(Calendar API의 종일 이벤트 end는 배타적 상한).
+    """
+    token = _access_token()
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    body = {"summary": summary, "start": {"date": start_date}, "end": {"date": end_date}}
+
+    resp = requests.patch(
+        f"{API_BASE}/calendars/{calendar_id}/events/{event_id}",
+        headers=headers,
+        json=body,
+        timeout=10,
+    )
+    if resp.status_code == 404:
+        resp = requests.post(
+            f"{API_BASE}/calendars/{calendar_id}/events",
+            headers=headers,
+            json={**body, "id": event_id},
+            timeout=10,
+        )
     resp.raise_for_status()

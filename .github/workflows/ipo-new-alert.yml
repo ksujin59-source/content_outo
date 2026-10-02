@@ -1,17 +1,24 @@
 name: IPO New Listing Alert
 
-# 38.co.kr 공모주 청약일정을 하루 4번(평일 09/13/14/18시 KST) 확인해서, 새로 청약
+# 38.co.kr 공모주 청약일정을 하루 4번(평일 09/13/14/18시 KST 근처) 확인해서, 새로 청약
 # 가능해진 공모주가 있으면 공모주캘린더 탭에 기록하고 텔레그램으로 알린다. 그 외에도
 # 공모가확정/청약 일주일전/청약 첫날/청약 마지막날 알림을 각각 최대 1회씩 보낸다
-# (공모주알람로그 탭으로 dedup). 14시(KST) 슬롯은 "청약 마지막날" 알림이 반드시
-# 오후 2시대에 나가도록 하기 위해 추가함 (ipo_new_alert.py의 in_afternoon_window 참고).
+# (공모주알람로그 탭으로 dedup). 14시(KST) 슬롯은 "청약 마지막날" 알림을 위해 추가함
+# (ipo_new_alert.py의 afternoon_or_later 참고) — 다만 GitHub Actions의 schedule
+# 트리거는 정각에 몰리면 수 분~수십 분씩 밀리거나 통째로 스킵되는 경우가 실제로
+# 잦아서(공식 문서에도 명시된 동작), 분을 05로 밀어 혼잡을 조금 피하고, 그래도 밀리거나
+# 스킵되는 경우를 대비해 "마지막날" 체크는 13:50 이후면 그날 어느 실행에서든 걸리도록
+# 완화해뒀다(위 참고 함수).
+#
+# 매 실행마다 확인된 공모주 일정(청약기간/상장예정일)을 STOCK_GOOGLE_CALENDAR_ID
+# 캘린더에도 동기화한다(내가 한 행동이 아니라 이미 확정된 시장 일정 반영).
 #
 # 필요한 저장소 시크릿은 process-trades.yml / price-alert.yml과 동일 (STOCK_TELEGRAM_*,
-# GOOGLE_*) — 이미 등록되어 있다면 추가 등록 불필요.
+# GOOGLE_*, STOCK_GOOGLE_CALENDAR_ID) — 이미 등록되어 있다면 추가 등록 불필요.
 
 on:
   schedule:
-    - cron: "0 0,4,5,9 * * 1-5"
+    - cron: "5 0,4,5,9 * * 1-5"
   workflow_dispatch:
 
 jobs:
@@ -35,4 +42,5 @@ jobs:
           STOCK_TELEGRAM_CHAT_ID: ${{ secrets.STOCK_TELEGRAM_CHAT_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          STOCK_GOOGLE_CALENDAR_ID: ${{ secrets.STOCK_GOOGLE_CALENDAR_ID }}
         run: python scripts/stock/ipo_new_alert.py
