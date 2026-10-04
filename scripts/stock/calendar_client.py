@@ -27,12 +27,16 @@ process_trades.py의 모듈 docstring에 이 제약이 설명되어 있다).
   - `upsert_simple_event`: 공모주 청약/상장 "일정" 동기화용 — 내가 한 행동이 아니라
     38.co.kr에서 긁어온, 이미 확정된 시장 일정을 캘린더에 반영한다. 호출부(ipo_new_alert.py)가
     공모주 번호(no)로 결정론적 id를 만들어 넘기므로, 스크래핑할 때마다 다시 불러도
-    같은 이벤트를 덮어쓸 뿐 중복 생성되지 않는다.
+    같은 이벤트를 덮어쓸 뿐 중복 생성되지 않는다. 내가 실제로 청약한 종목의 "상장일
+    보유 현황"(ipo_holding_event_id로 만든 id)도 같은 함수로 관리한다 — 상장예정일이
+    확인되는 즉시(아직 매도 전이라 청약가로) 미리 캘린더에 뜨고, 실제로 매도하면
+    process_trades.py가 같은 id로 매도가/수익으로 덮어써서 이벤트가 하나로 이어진다.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import os
 
@@ -186,16 +190,23 @@ def create_event(calendar_id: str, date_str: str, summary: str, description: str
     resp.raise_for_status()
 
 
-def upsert_simple_event(calendar_id: str, event_id: str, summary: str, start_date: str, end_date: str) -> None:
-    """공모주 청약/상장 "일정"(내가 한 행동이 아니라 시장에 이미 확정된 일정) 동기화용.
+def upsert_simple_event(
+    calendar_id: str, event_id: str, summary: str, start_date: str, end_date: str,
+    description: str | None = None,
+) -> None:
+    """공모주 청약/상장 "일정"(내가 한 행동이 아니라 시장에 이미 확정된 일정, 또는 상장일
+    보유 현황처럼 시간에 따라 내용이 갱신되는 이벤트) 동기화용.
 
     event_id로 존재 여부를 판단해 있으면 최신 정보로 덮어쓰고(PATCH), 없으면 그
-    id로 새로 만든다(POST) — 같은 공모주를 매번 다시 동기화해도 중복 생성되지 않는다.
+    id로 새로 만든다(POST) — 같은 id로 매번 다시 동기화해도 중복 생성되지 않는다.
     end_date는 종료일 "다음날"(Calendar API의 종일 이벤트 end는 배타적 상한).
+    description을 안 주면(None) 기존 설명은 그대로 두고 summary/날짜만 갱신한다.
     """
     token = _access_token()
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     body = {"summary": summary, "start": {"date": start_date}, "end": {"date": end_date}}
+    if description is not None:
+        body["description"] = description
 
     resp = requests.patch(
         f"{API_BASE}/calendars/{calendar_id}/events/{event_id}",
@@ -211,3 +222,21 @@ def upsert_simple_event(calendar_id: str, event_id: str, summary: str, start_dat
             timeout=10,
         )
     resp.raise_for_status()
+
+
+def ipo_holding_event_id(name: str, applicant: str, broker: str) -> str:
+    """공모주 청약 1건(종목명+신청인+증권사로 식별)의 "상장일 보유 현황" 이벤트 id.
+
+    상장예정일이 바뀌어도(최초엔 미정이다가 나중에 확정되는 경우) 같은 id를 계속
+    쓰므로, 날짜/내용이 바뀌면 upsert_simple_event가 기존 이벤트를 그 자리에서
+    갱신한다(날짜가 바뀌면 이벤트가 캘린더에서 그 자리로 옮겨짐).
+    """
+    digest = hashlib.sha1(f"{name}|{applicant}|{broker}".encode()).hexdigest()
+    return "ipohold" + digest[:16]
+
+
+def ipo_refund_event_id(name: str, applicant: str, broker: str) -> str:
+    """같은 청약 1건의 "환불일" 이벤트 id — ipo_holding_event_id와 같은 식별 기준
+    (종목명+신청인+증권사)이지만 접두어(salt)를 달리해서 서로 다른 id가 나오게 한다."""
+    digest = hashlib.sha1(f"refund|{name}|{applicant}|{broker}".encode()).hexdigest()
+    return "iporefund" + digest[:16]

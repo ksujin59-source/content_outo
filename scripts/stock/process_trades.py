@@ -74,6 +74,7 @@ TRADE_RE = re.compile(r"^(매수|매도)\s+(\S+)\s+(\S+)\s+(\d+)\s+([\d.]+)(?:\s
 IPO_SELL_PREFIX_RE = re.compile(r"^공모매도\s+(.+)$")
 IPO_REPLY_SELL_RE = re.compile(r"^(\S+)\s+(\d+)\s+(시초가|[\d.]+)$")
 IPO_ALERT_NAME_RE = re.compile(r"(?:오늘|내일) (\S+) 상장")
+IPO_APPLY_CONFIRM_NAME_RE = re.compile(r"✅ (\S+) 청약 기록 완료")
 IPO_SCHEDULE_ALERT_NAME_PATTERNS = [
     re.compile(r"새 공모주: (\S+)"),
     re.compile(r"(\S+) 공모가 확정"),
@@ -145,6 +146,10 @@ def _extract_ipo_schedule_name(alert_text: str) -> str | None:
     return None
 
 
+def _next_iso(date_str: str) -> str:
+    return (dt.date.fromisoformat(date_str) + dt.timedelta(days=1)).isoformat()
+
+
 def _strip_edge_word(text: str, word: str) -> str:
     """"청약"을 앞이나 뒤 어디에 붙여 보내도 받아주기 위한 전처리 — "멜콘 대신증권
     수진 10주 청약"처럼 뒤에 붙이는 습관이 흔해서, 맨 앞/맨 뒤에 그 단어 하나만 있으면
@@ -206,6 +211,36 @@ def _classify_ipo_apply_tokens(tokens: list[str], ws_calendar=None) -> dict | No
         return None
 
     return {"name": name, "broker": broker, "applicant": remaining[0], "qty": qty, "price": price}
+
+
+def _classify_allotment_tokens(tokens: list[str]) -> dict | None:
+    """"✅ OO 청약 기록 완료" 메시지에 대한 답장으로 배정 수량을 알려줄 때 쓰는 토큰
+    분류기 — "미래에셋 5주"(증권사 수량) 또는 신청인이 여럿이라 애매할 때는 "미래에셋
+    5주 수진"(증권사 수량 신청인)까지, 순서 상관없이 받는다. 수량("OO주")과 증권사
+    (KNOWN_BROKERS)를 떼어내고 남는 토큰이 0개면 신청인 미지정, 1개면 신청인, 2개
+    이상이면 애매해서 None."""
+    remaining = list(tokens)
+
+    qty = None
+    for t in remaining:
+        m = re.fullmatch(r"(\d+)주", t)
+        if m:
+            qty = int(m.group(1))
+            remaining.remove(t)
+            break
+    if qty is None:
+        return None
+
+    exact_brokers = [t for t in remaining if t in KNOWN_BROKERS]
+    broker = exact_brokers[0] if exact_brokers else next((t for t in remaining if _is_broker_token(t)), None)
+    if broker is None:
+        return None
+    remaining.remove(broker)
+
+    if len(remaining) > 1:
+        return None
+
+    return {"broker": broker, "qty": qty, "applicant": remaining[0] if remaining else None}
 
 
 def _classify_trade_tokens(tokens: list[str]) -> dict | None:
@@ -429,6 +464,7 @@ def _handle_ipo_apply(
 ) -> None:
     calendar_row = _find_ipo_calendar_row(ws_calendar, name)
     listing_date = calendar_row[7] if calendar_row and len(calendar_row) > 7 else ""
+    refund_date = calendar_row[8] if calendar_row and len(calendar_row) > 8 else ""
     lead_manager = calendar_row[6] if calendar_row and len(calendar_row) > 6 else ""
 
     if price is None:
@@ -450,11 +486,85 @@ def _handle_ipo_apply(
         event_summary += f" (주간사 {lead_manager})"
     calendar_client.create_event(stock_calendar_id, today, event_summary)
 
+    if listing_date:
+        # 상장예정일이 이미 알려져 있으면 "상장일 보유 현황" 이벤트를 바로 미리 띄워둔다
+        # (아직 안 팔았으니 청약가로 표시 — 실제로 매도하면 _finalize_ipo_sale이 같은
+        # id로 매도가/수익으로 덮어쓴다). 상장예정일을 아직 모르면 ipo_new_alert.py가
+        # 나중에 확정되는 걸 보고 대신 채워준다.
+        calendar_client.upsert_simple_event(
+            stock_calendar_id, calendar_client.ipo_holding_event_id(name, applicant, broker),
+            f"[상장] {name} {qty}주 {price:,.0f}원 {broker}",
+            listing_date, _next_iso(listing_date),
+        )
+    if refund_date:
+        calendar_client.upsert_simple_event(
+            stock_calendar_id, calendar_client.ipo_refund_event_id(name, applicant, broker),
+            f"[환불일] {name} {qty}주 {price:,.0f}원 {broker}",
+            refund_date, _next_iso(refund_date),
+        )
+
     reply = f"✅ {name} 청약 기록 완료\n{broker} · {applicant} · {qty}주 @{price:,.0f}"
     if lead_manager:
         reply += f"\n주간사 {lead_manager}"
     reply += f"\n상장예정일 {listing_date}" if listing_date else "\n상장예정일 미정 (확정되면 자동 반영됨)"
+    if refund_date:
+        reply += f"\n환불일 {refund_date}"
     telegram_client.send_message(reply)
+
+
+def _handle_ipo_allotment(
+    ws_apply, ws_calendar, stock_calendar_id: str,
+    name: str, broker: str, qty: int, applicant: str | None = None,
+) -> None:
+    """"✅ OO 청약 기록 완료" 메시지에 답장으로 배정 수량(실제 당첨 수량 — 청약 때 신청한
+    수량과 다를 수 있음)과 증권사를 알려주면 그걸로 공모주신청 탭의 청약수량을 갱신하고,
+    캘린더의 [상장]/[환불일] 이벤트도 같은 수량으로 다시 맞춘다."""
+    rows = ws_apply.get_all_values()[1:]
+    candidates = [
+        (idx, row) for idx, row in enumerate(rows, start=2)
+        if len(row) >= 8 and row[7] == "대기" and row[2] == broker
+        and row[1] and (row[1] == name or name in row[1] or row[1] in name)
+        and (applicant is None or row[3] == applicant)
+    ]
+
+    if not candidates:
+        telegram_client.send_message(f"⚠️ '{name}' · '{broker}' 명의로 대기중인 청약 신청을 찾지 못했습니다.")
+        return
+    if len(candidates) > 1:
+        applicants = ", ".join(row[3] for _, row in candidates)
+        telegram_client.send_message(
+            f"⚠️ '{name}' · '{broker}'로 대기중인 신청이 여러 건입니다 ({applicants}).\n"
+            f"신청인도 포함해서 다시 보내주세요: {broker} {qty}주 <신청인>"
+        )
+        return
+
+    row_idx, row = candidates[0]
+    canon_name, canon_broker, canon_applicant = row[1], row[2], row[3]
+    old_qty = int(row[4])
+    price = float(row[5])
+    listing_date = row[6] if len(row) > 6 else ""
+
+    ws_apply.update(f"E{row_idx}", [[qty]])
+
+    if listing_date:
+        calendar_client.upsert_simple_event(
+            stock_calendar_id, calendar_client.ipo_holding_event_id(canon_name, canon_applicant, canon_broker),
+            f"[상장] {canon_name} {qty}주 {price:,.0f}원 {canon_broker}",
+            listing_date, _next_iso(listing_date),
+        )
+
+    calendar_row = _find_ipo_calendar_row(ws_calendar, canon_name)
+    refund_date = calendar_row[8] if calendar_row and len(calendar_row) > 8 else ""
+    if refund_date:
+        calendar_client.upsert_simple_event(
+            stock_calendar_id, calendar_client.ipo_refund_event_id(canon_name, canon_applicant, canon_broker),
+            f"[환불일] {canon_name} {qty}주 {price:,.0f}원 {canon_broker}",
+            refund_date, _next_iso(refund_date),
+        )
+
+    telegram_client.send_message(
+        f"✅ {canon_name} 배정 수량 반영: {old_qty}주 → {qty}주 ({canon_broker} · {canon_applicant})"
+    )
 
 
 def _find_ipo_sell_candidates(ws_apply, name: str, applicant: str, broker: str | None):
@@ -469,8 +579,10 @@ def _find_ipo_sell_candidates(ws_apply, name: str, applicant: str, broker: str |
 def _finalize_ipo_sale(ws_apply, ws_calendar, stock_calendar_id: str, row_idx, row, today: str, price_token: str, expected_qty: int | None = None) -> None:
     name = row[1]
     broker = row[2]
+    applicant = row[3]
     apply_qty = int(row[4])
     apply_price = float(row[5])
+    listing_date = row[6] if len(row) > 6 and row[6] else today
 
     if price_token == "시초가":
         try:
@@ -488,12 +600,11 @@ def _finalize_ipo_sale(ws_apply, ws_calendar, stock_calendar_id: str, row_idx, r
     profit_pct = (sell_price - apply_price) / apply_price * 100 if apply_price else 0.0
     profit_amount = (sell_price - apply_price) * apply_qty
     ws_apply.update(f"H{row_idx}:K{row_idx}", [["매도완료", f"{sell_price:.2f}", today, f"{profit_pct:.2f}"]])
-    event_summary = f"[상장] {name} {broker} {apply_qty}주 {sell_price:,.0f}원"
-    if lead_manager:
-        event_summary += f" (주간사 {lead_manager})"
-    calendar_client.create_event(
-        stock_calendar_id, today, event_summary,
-        f"수익 {profit_amount:,.0f}원 ({profit_pct:+.1f}%)",
+    event_summary = f"[상장] {name} {apply_qty}주 {sell_price:,.0f}원 {broker}"
+    calendar_client.upsert_simple_event(
+        stock_calendar_id, calendar_client.ipo_holding_event_id(name, applicant, broker),
+        event_summary, listing_date, _next_iso(listing_date),
+        description=f"수익 {profit_amount:,.0f}원 ({profit_pct:+.1f}%)",
     )
 
     reply = f"✅ {name} 매도완료 · {sell_price:,.0f}원\n수익률 {profit_pct:+.1f}%"
@@ -617,6 +728,18 @@ def main() -> None:
                     ws_ipo_apply, ws_ipo_calendar, stock_calendar_id, today, schedule_alert_name,
                     reply_apply_parsed["broker"], reply_apply_parsed["applicant"],
                     reply_apply_parsed["qty"], reply_apply_parsed["price"],
+                )
+                continue
+
+            apply_confirm_match = IPO_APPLY_CONFIRM_NAME_RE.search(reply_to_text)
+            allotment_parsed = (
+                _classify_allotment_tokens(text.split()) if apply_confirm_match else None
+            )
+
+            if allotment_parsed:
+                _handle_ipo_allotment(
+                    ws_ipo_apply, ws_ipo_calendar, stock_calendar_id, apply_confirm_match.group(1),
+                    allotment_parsed["broker"], allotment_parsed["qty"], allotment_parsed["applicant"],
                 )
                 continue
 

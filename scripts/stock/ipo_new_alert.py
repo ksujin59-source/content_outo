@@ -24,7 +24,15 @@
 아니라, 시장에 이미 확정된 "일정"이라 별도 함수(calendar_client.upsert_simple_event)로
 공모주 번호(no) 기반 결정론적 id를 써서 반영한다(재실행해도 중복 생성되지 않고 최신
 정보로 덮어씀): 청약기간을 "[청약] 종목명 (가격)" 이벤트로, 상장예정일이 확인되면
-"[상장예정] 종목명" 이벤트로 각각 만든다.
+"[상장예정] 종목명" 이벤트로, 환불일이 확인되면 "[환불일] 종목명" 이벤트로 만든다.
+
+상장예정일이 확인될 때마다, 공모주신청 탭에 그 종목으로 대기중인(아직 매도 안 한) 내
+신청 건이 있는지도 찾아서 "[상장] 종목명 수량주 가격원 증권사" 이벤트를 상장예정일에
+미리 띄워준다(아직 매도 전이라 청약가 기준) — process_trades.py에서 청약할 때 이미
+상장예정일을 알면 바로 띄워주지만, 그때 몰랐다가 나중에(이 스크립트가 재조회해서)
+확인되는 경우를 보강하기 위함. 실제로 매도하면 process_trades.py가 같은 id
+(calendar_client.ipo_holding_event_id)로 매도가/수익으로 덮어써서 이벤트가 하나로
+이어진다.
 """
 
 from __future__ import annotations
@@ -59,7 +67,9 @@ def _price_label(listing: ipo_calendar.IpoListing) -> str:
     return f"{price}원"
 
 
-def _sync_calendar(stock_calendar_id: str, listing: ipo_calendar.IpoListing, listing_date_iso: str) -> None:
+def _sync_calendar(
+    stock_calendar_id: str, listing: ipo_calendar.IpoListing, listing_date_iso: str, refund_date_iso: str,
+) -> None:
     if not stock_calendar_id:
         return
 
@@ -78,6 +88,46 @@ def _sync_calendar(stock_calendar_id: str, listing: ipo_calendar.IpoListing, lis
             f"[상장예정] {listing.name} · {listing.lead_manager}",
             listing_date_iso, _next_iso(listing_date_iso),
         )
+
+    if refund_date_iso:
+        calendar_client.upsert_simple_event(
+            stock_calendar_id, f"iporefunddate{listing.no}",
+            f"[환불일] {listing.name} · {listing.lead_manager}",
+            refund_date_iso, _next_iso(refund_date_iso),
+        )
+
+
+def _sync_holding_events(
+    ws_apply, stock_calendar_id: str, name: str, listing_date_iso: str, refund_date_iso: str,
+) -> None:
+    """상장예정일/환불일이 확인된 종목으로 대기중인 내 신청 건이 있으면 "상장일 보유
+    현황"/"환불일" 이벤트를 미리 띄운다(아직 매도 전이라 청약가 기준) — 청약 시점엔
+    그 날짜들을 몰랐다가 나중에 확인되는 경우를 보강."""
+    if not stock_calendar_id or not (listing_date_iso or refund_date_iso):
+        return
+    for row in ws_apply.get_all_values()[1:]:
+        if len(row) < 8 or row[7] != "대기":
+            continue
+        row_name = row[1]
+        if not (row_name == name or name in row_name or row_name in name):
+            continue
+        broker, applicant = row[2], row[3]
+        try:
+            qty, price = int(row[4]), float(row[5])
+        except ValueError:
+            continue
+        if listing_date_iso:
+            calendar_client.upsert_simple_event(
+                stock_calendar_id, calendar_client.ipo_holding_event_id(row_name, applicant, broker),
+                f"[상장] {row_name} {qty}주 {price:,.0f}원 {broker}",
+                listing_date_iso, _next_iso(listing_date_iso),
+            )
+        if refund_date_iso:
+            calendar_client.upsert_simple_event(
+                stock_calendar_id, calendar_client.ipo_refund_event_id(row_name, applicant, broker),
+                f"[환불일] {row_name} {qty}주 {price:,.0f}원 {broker}",
+                refund_date_iso, _next_iso(refund_date_iso),
+            )
 
 
 def _already_alerted(ws_alarm_log, today: str, name: str, alert_type: str) -> bool:
@@ -100,10 +150,12 @@ def main() -> None:
     spreadsheet = sheets_client.get_spreadsheet()
     ws_calendar = sheets_client.get_or_create_worksheet(spreadsheet, "공모주캘린더")
     ws_alarm_log = sheets_client.get_or_create_worksheet(spreadsheet, "공모주알람로그")
+    ws_apply = sheets_client.get_or_create_worksheet(spreadsheet, "공모주신청")
 
     rows = ws_calendar.get_all_values()[1:]
     existing = {row[0]: idx for idx, row in enumerate(rows, start=2) if row}
     existing_listing_date = {row[0]: (row[7] if len(row) > 7 else "") for row in rows if row}
+    existing_refund_date = {row[0]: (row[8] if len(row) > 8 else "") for row in rows if row}
     existing_price = {row[0]: (row[4] if len(row) > 4 else "") for row in rows if row}
 
     now_kst = dt.datetime.now(KST)
@@ -117,6 +169,7 @@ def main() -> None:
         if listing.no not in existing:
             detail = ipo_calendar.fetch_detail(listing.no)
             listing_date_iso = _to_iso(detail["listing_date"])
+            refund_date_iso = _to_iso(detail["refund_date"])
             ws_calendar.append_row([
                 listing.no,
                 listing.name,
@@ -126,7 +179,7 @@ def main() -> None:
                 listing.price_range,
                 listing.lead_manager,
                 listing_date_iso,
-                _to_iso(detail["refund_date"]),
+                refund_date_iso,
             ])
             telegram_client.send_message(
                 f"🆕 새 공모주: {listing.name}\n"
@@ -134,12 +187,14 @@ def main() -> None:
                 f"희망공모가 {listing.price_range}원\n"
                 f"주간사 {listing.lead_manager}"
             )
-            _sync_calendar(stock_calendar_id, listing, listing_date_iso)
+            _sync_calendar(stock_calendar_id, listing, listing_date_iso, refund_date_iso)
+            _sync_holding_events(ws_apply, stock_calendar_id, listing.name, listing_date_iso, refund_date_iso)
             new_count += 1
             continue
 
         row_idx = existing[listing.no]
         listing_date_iso = existing_listing_date.get(listing.no, "")
+        refund_date_iso = existing_refund_date.get(listing.no, "")
 
         if not existing_price.get(listing.no) and listing.fixed_price:
             ws_calendar.update(f"E{row_idx}", [[listing.fixed_price]])
@@ -152,11 +207,13 @@ def main() -> None:
             detail = ipo_calendar.fetch_detail(listing.no)
             if detail["listing_date"]:
                 listing_date_iso = _to_iso(detail["listing_date"])
+                refund_date_iso = _to_iso(detail["refund_date"])
                 ws_calendar.update(f"H{row_idx}:I{row_idx}", [[
-                    listing_date_iso, _to_iso(detail["refund_date"]),
+                    listing_date_iso, refund_date_iso,
                 ]])
 
-        _sync_calendar(stock_calendar_id, listing, listing_date_iso)
+        _sync_calendar(stock_calendar_id, listing, listing_date_iso, refund_date_iso)
+        _sync_holding_events(ws_apply, stock_calendar_id, listing.name, listing_date_iso, refund_date_iso)
 
         start_iso = _to_iso(listing.subscribe_start)
         end_iso = _to_iso(listing.subscribe_end)
@@ -184,6 +241,32 @@ def main() -> None:
                 f"⏰ {listing.name} 청약 마지막날입니다! 오늘까지만 청약 가능"
                 f" (주간사 {listing.lead_manager})",
             )
+
+    # 38.co.kr의 "현재 청약중" 목록은 청약종료일이 지나면 그 종목을 더 이상 보여주지
+    # 않는다 — 상장일은 보통 청약종료일 며칠 뒤라, 그 사이(청약 마감~상장) 기간엔 위
+    # listings 루프에 안 걸려서 상장예정일/환불일 캘린더 동기화가 끊겼다. 시트에 남아있는
+    # 상장예정일/환불일이 아직 안 지난 행을 한 번 더 훑어서 보강한다.
+    live_nos = {listing.no for listing in listings}
+    for row in rows:
+        if not row or row[0] in live_nos:
+            continue
+        no, name = row[0], row[1]
+        lead_manager = row[6] if len(row) > 6 else ""
+        listing_date_iso = row[7] if len(row) > 7 else ""
+        refund_date_iso = row[8] if len(row) > 8 else ""
+        if not listing_date_iso and not refund_date_iso:
+            continue
+        if listing_date_iso and listing_date_iso >= today and stock_calendar_id:
+            calendar_client.upsert_simple_event(
+                stock_calendar_id, f"ipolist{no}", f"[상장예정] {name} · {lead_manager}",
+                listing_date_iso, _next_iso(listing_date_iso),
+            )
+        if refund_date_iso and refund_date_iso >= today and stock_calendar_id:
+            calendar_client.upsert_simple_event(
+                stock_calendar_id, f"iporefunddate{no}", f"[환불일] {name} · {lead_manager}",
+                refund_date_iso, _next_iso(refund_date_iso),
+            )
+        _sync_holding_events(ws_apply, stock_calendar_id, name, listing_date_iso, refund_date_iso)
 
     print(f"신규 {new_count}건, 총 {len(listings)}건 확인.")
 
