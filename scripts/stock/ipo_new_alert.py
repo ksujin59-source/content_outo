@@ -102,10 +102,16 @@ def _sync_holding_events(
 ) -> None:
     """상장예정일/환불일이 확인된 종목으로 대기중인 내 신청 건이 있으면 "상장일 보유
     현황"/"환불일" 이벤트를 미리 띄운다(아직 매도 전이라 청약가 기준) — 청약 시점엔
-    그 날짜들을 몰랐다가 나중에 확인되는 경우를 보강."""
+    그 날짜들을 몰랐다가 나중에 확인되는 경우를 보강.
+
+    공모주신청 탭의 상장예정일(G열) 자체도 비어있으면 같이 채운다 — ipo_listing_alert.py
+    (상장 전날/당일 매도 리마인더)가 이 칸만 보고 판단하는데, 청약 시점에 상장예정일을
+    몰랐으면 이 칸이 영원히 빈 채로 남아 "당일 아침 8시" 알림이 영영 안 나가는 문제가
+    있었다 — 여기서 채워줘야 그 알림이 걸릴 기회가 생긴다."""
     if not stock_calendar_id or not (listing_date_iso or refund_date_iso):
         return
-    for row in ws_apply.get_all_values()[1:]:
+    rows = ws_apply.get_all_values()[1:]
+    for idx, row in enumerate(rows, start=2):
         if len(row) < 8 or row[7] != "대기":
             continue
         row_name = row[1]
@@ -116,6 +122,10 @@ def _sync_holding_events(
             qty, price = int(row[4]), float(row[5])
         except ValueError:
             continue
+
+        if listing_date_iso and (len(row) <= 6 or not row[6]):
+            ws_apply.update(f"G{idx}", [[listing_date_iso]])
+
         if listing_date_iso:
             calendar_client.upsert_simple_event(
                 stock_calendar_id, calendar_client.ipo_holding_event_id(row_name, applicant, broker),
