@@ -39,6 +39,12 @@
     음식 목록). 알레르기 테스트용으로 날짜별 구글 캘린더 이벤트(하루 1개로 누적)와
     시트(이유식기록 탭)에 기록한다. 매매 형식과 겹치지 않도록 "이유식" 접두어로 구분한다
     — 이 접두어 없이 보내면 매매 형식 파싱에 실패해 사용법 안내만 돌아간다.
+  - 공모주 정보 이미지: 증권사 앱 스크린샷(사진 메시지)을 보내면 image_extract.py가
+    OCR(Tesseract, 무료)로 종목명/공모가/상장예정일/환불일을 읽어서 공모주캘린더 탭에
+    반영하고, 대기중인 신청 건이 있으면 캘린더 [상장]/[환불일] 이벤트와 공모주신청 탭
+    상장예정일도 같이 맞춘다. 좌표 템플릿이 아니라 "공모가"/"상장예정일" 같은 라벨
+    텍스트 주변을 찾는 방식이라 증권사마다 화면이 달라도 대체로 통하지만, 비전 LLM보다
+    인식률이 낮을 수 있다(_handle_ipo_image 참고).
 
 이 네 종류 모두 같은 텔레그램 봇(STOCK_TELEGRAM_BOT_TOKEN)의 getUpdates를 공유하므로,
 반드시 이 파일 하나의 폴링 루프 안에서 처리해야 한다 — getUpdates는 offset을 넘기면
@@ -62,6 +68,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 import calendar_client
+import image_extract
 import price_lookup
 import sheets_client
 import telegram_client
@@ -110,6 +117,7 @@ USAGE_HINT = (
     "공모주 매도: 상장일 알림에 답장으로 `수진 10 시초가`, 또는 직접\n"
     "`공모매도 바로팜 수진 시초가` (둘 다 어순 무관)\n"
     "이유식 기록: `이유식 고구마, 소고기`\n"
+    "공모주 정보: 증권사 앱 스크린샷을 사진으로 보내면 자동 인식\n"
     "전체 양식 다시 보려면: `양식`"
 )
 
@@ -134,6 +142,9 @@ FORMAT_GUIDE = (
     "둘 다 어순 무관(종목명/신청인/증권사/가격 순서 섞여도 됨)\n\n"
     "🍼 이유식 기록\n"
     "`이유식 고구마, 소고기` (쉼표/줄바꿈/·// 로 여러 개 구분)\n\n"
+    "🖼️ 공모주 정보 (스크린샷)\n"
+    "증권사 앱 화면을 사진으로 그냥 보내면 공모가/상장예정일/환불일을 자동으로 읽어서\n"
+    "반영함 — 어느 증권사 앱이든 상관없음\n\n"
     f"이 안내는 아무 때나 `{FORMAT_GUIDE_TRIGGER}`라고 보내면 다시 볼 수 있습니다."
 )
 
@@ -152,18 +163,30 @@ def _next_iso(date_str: str) -> str:
 
 def _strip_edge_word(text: str, word: str) -> str:
     """"청약"을 앞이나 뒤 어디에 붙여 보내도 받아주기 위한 전처리 — "멜콘 대신증권
-    수진 10주 청약"처럼 뒤에 붙이는 습관이 흔해서, 맨 앞/맨 뒤에 그 단어 하나만 있으면
-    떼고 나머지로 핵심 패턴을 매칭한다."""
+    수진 10주 청약"처럼 뒤에 붙이는 습관이 흔해서, 맨 앞/맨 뒤 토큰이 그 단어로
+    시작하면("청약", "청약완료", "청약했음" 등) 떼고 나머지로 핵심 패턴을 매칭한다.
+    정확히 일치할 때만 떼면 "청약완료"처럼 흔한 활용형을 놓쳐서 토큰 분류가 애매해지는
+    문제가 있었다(2026-10-08에 "삼성증권 김수진 10주 청약완료"가 이래서 인식 실패함)."""
     tokens = text.split()
-    if tokens and tokens[0] == word:
+    if tokens and tokens[0].startswith(word):
         return " ".join(tokens[1:])
-    if tokens and tokens[-1] == word:
+    if tokens and tokens[-1].startswith(word):
         return " ".join(tokens[:-1])
     return text
 
 
 def _is_broker_token(token: str) -> bool:
     return any(token in b or b in token for b in KNOWN_BROKERS)
+
+
+def _is_price_token(token: str) -> bool:
+    """가격 토큰 판정 — "90500"뿐 아니라 "90500원"처럼 단위를 바로 붙여 보내는 습관도
+    받아주기 위해 끝의 "원"은 있어도 없어도 되게 한다."""
+    return bool(re.fullmatch(r"[\d,]+(?:\.\d+)?원?", token))
+
+
+def _parse_price_token(token: str) -> float:
+    return float(token.rstrip("원").replace(",", ""))
 
 
 def _classify_ipo_apply_tokens(tokens: list[str], ws_calendar=None) -> dict | None:
@@ -189,8 +212,8 @@ def _classify_ipo_apply_tokens(tokens: list[str], ws_calendar=None) -> dict | No
 
     price = None
     for t in remaining:
-        if re.fullmatch(r"[\d,]+", t):
-            price = float(t.replace(",", ""))
+        if _is_price_token(t):
+            price = _parse_price_token(t)
             remaining.remove(t)
             break
 
@@ -264,8 +287,8 @@ def _classify_trade_tokens(tokens: list[str]) -> dict | None:
 
     price = None
     for t in remaining:
-        if re.fullmatch(r"[\d,]+(?:\.\d+)?", t):
-            price = float(t.replace(",", ""))
+        if _is_price_token(t):
+            price = _parse_price_token(t)
             remaining.remove(t)
             break
     if price is None:
@@ -332,8 +355,8 @@ def _classify_ipo_sell_tokens(tokens: list[str], ws_apply) -> dict | None:
 
     price_token = None
     for t in remaining:
-        if t == "시초가" or re.fullmatch(r"[\d,.]+", t):
-            price_token = t
+        if t == "시초가" or _is_price_token(t):
+            price_token = t if t == "시초가" else str(_parse_price_token(t))
             remaining.remove(t)
             break
     if price_token is None:
@@ -394,8 +417,8 @@ def _classify_ipo_reply_sell_tokens(tokens: list[str]) -> dict | None:
 
     price_token = None
     for t in remaining:
-        if t == "시초가" or re.fullmatch(r"[\d,.]+", t):
-            price_token = t
+        if t == "시초가" or _is_price_token(t):
+            price_token = t if t == "시초가" else str(_parse_price_token(t))
             remaining.remove(t)
             break
     if price_token is None:
@@ -458,6 +481,108 @@ def _find_ipo_calendar_row(ws_calendar, name: str) -> list[str] | None:
     return None
 
 
+def _find_ipo_calendar_row_idx(ws_calendar, name: str) -> tuple[int, list[str]] | None:
+    rows = ws_calendar.get_all_values()[1:]
+    for idx, row in enumerate(rows, start=2):
+        if len(row) > 1 and row[1] == name:
+            return idx, row
+    for idx, row in enumerate(rows, start=2):
+        if len(row) > 1 and row[1] and (name in row[1] or row[1] in name):
+            return idx, row
+    return None
+
+
+def _sync_apply_calendar_for_name(ws_apply, stock_calendar_id: str, name: str, listing_date: str, refund_date: str) -> None:
+    """공모주캘린더가(이미지 인식 등으로) 갱신된 뒤, 그 종목으로 대기중인 내 신청 건의
+    캘린더 이벤트와 공모주신청 탭 상장예정일도 같이 맞춘다 — ipo_new_alert.py의
+    _sync_holding_events와 같은 패턴(모듈이 달라 그대로 복제)."""
+    if not stock_calendar_id or not (listing_date or refund_date):
+        return
+    rows = ws_apply.get_all_values()[1:]
+    for idx, row in enumerate(rows, start=2):
+        if len(row) < 8 or row[7] != "대기":
+            continue
+        row_name = row[1]
+        if not (row_name == name or name in row_name or row_name in name):
+            continue
+        broker, applicant = row[2], row[3]
+        try:
+            qty, price = int(row[4]), float(row[5])
+        except ValueError:
+            continue
+
+        if listing_date and (len(row) <= 6 or not row[6]):
+            ws_apply.update(f"G{idx}", [[listing_date]])
+
+        if listing_date:
+            calendar_client.upsert_simple_event(
+                stock_calendar_id, calendar_client.ipo_holding_event_id(row_name, applicant, broker),
+                f"[상장] {row_name} {qty}주 {price:,.0f}원 {broker}",
+                listing_date, _next_iso(listing_date),
+            )
+        if refund_date:
+            calendar_client.upsert_simple_event(
+                stock_calendar_id, calendar_client.ipo_refund_event_id(row_name, applicant, broker),
+                f"[환불일] {row_name} {qty}주 {price:,.0f}원 {broker}",
+                refund_date, _next_iso(refund_date),
+            )
+
+
+def _handle_ipo_image(ws_calendar, ws_apply, stock_calendar_id: str, message: dict) -> None:
+    """증권사 앱 스크린샷(어느 증권사든)에서 OCR로 공모가/상장예정일/환불일을 읽어서
+    공모주캘린더 탭과(대기중인 신청이 있으면) 캘린더에 반영한다."""
+    photo_sizes = message.get("photo") or []
+    if not photo_sizes:
+        return
+    file_id = max(photo_sizes, key=lambda s: s.get("width", 0))["file_id"]
+
+    image_bytes = telegram_client.get_file_bytes(file_id)
+    known_names = [row[1] for row in ws_calendar.get_all_values()[1:] if len(row) > 1 and row[1]]
+    info = image_extract.extract_ipo_info(image_bytes, known_names)
+
+    if not info or not info.get("name"):
+        telegram_client.send_message(
+            "⚠️ 이미지에서 종목명을 읽지 못했습니다. 화질이 선명한지 확인해서 다시 보내시거나 직접 알려주세요."
+        )
+        return
+
+    name = info["name"]
+    found = _find_ipo_calendar_row_idx(ws_calendar, name)
+    if found is None:
+        telegram_client.send_message(f"⚠️ '{name}' 종목을 공모주캘린더 탭에서 찾지 못했습니다 (아직 추적 중이 아닐 수 있음).")
+        return
+    row_idx, row = found
+
+    updates = []
+    if info.get("price") and (len(row) <= 4 or not row[4] or row[4] == "-"):
+        try:
+            price_int = int(float(str(info["price"]).replace(",", "")))
+            ws_calendar.update(f"E{row_idx}", [[str(price_int)]])
+            updates.append(f"공모가 {price_int:,}원")
+        except (ValueError, TypeError):
+            pass
+    if info.get("listing_date") and (len(row) <= 7 or not row[7]):
+        ws_calendar.update(f"H{row_idx}", [[info["listing_date"]]])
+        updates.append(f"상장예정일 {info['listing_date']}")
+    if info.get("refund_date") and (len(row) <= 8 or not row[8]):
+        ws_calendar.update(f"I{row_idx}", [[info["refund_date"]]])
+        updates.append(f"환불일 {info['refund_date']}")
+
+    refreshed = _find_ipo_calendar_row(ws_calendar, name)
+    listing_date = refreshed[7] if refreshed and len(refreshed) > 7 else ""
+    refund_date = refreshed[8] if refreshed and len(refreshed) > 8 else ""
+    _sync_apply_calendar_for_name(ws_apply, stock_calendar_id, name, listing_date, refund_date)
+
+    reply = f"🖼️ '{name}' 이미지 인식 완료"
+    reply += "\n" + ("업데이트: " + ", ".join(updates) if updates else "이미 알고 있던 정보와 같아 변경 없음")
+    if info.get("allotment_qty"):
+        reply += (
+            f"\n화면상 배정수량은 {info['allotment_qty']}주로 보입니다 — 신청 건에 반영하려면"
+            f" 청약 완료 메시지에 답장으로 \"증권사 수량주\"를 보내주세요."
+        )
+    telegram_client.send_message(reply)
+
+
 def _handle_ipo_apply(
     ws_apply, ws_calendar, stock_calendar_id: str, today: str,
     name: str, broker: str, applicant: str, qty: int, price: float | None = None,
@@ -473,6 +598,19 @@ def _handle_ipo_apply(
             price = float(fixed_price.replace(",", "")) if fixed_price and fixed_price != "-" else None
         except ValueError:
             price = None
+        if price is None:
+            # 스팩(SPAC)주는 수요예측을 안 거쳐서 "확정공모가" 칸이 영원히 "-"로 남는
+            # 경우가 있다 — 그런 종목은 희망공모가범위가 "2,000~2,000"처럼 상/하단이
+            # 같은 고정가라, 그 값을 확정가로 봐도 된다.
+            price_range = calendar_row[5] if calendar_row and len(calendar_row) > 5 else ""
+            bounds = price_range.split("~") if price_range else []
+            if len(bounds) == 2:
+                try:
+                    low, high = float(bounds[0].replace(",", "")), float(bounds[1].replace(",", ""))
+                    if low == high:
+                        price = low
+                except ValueError:
+                    pass
         if price is None:
             telegram_client.send_message(
                 f"⚠️ '{name}' 확정공모가를 아직 찾지 못했습니다. 가격을 직접 알려주세요:\n"
@@ -681,9 +819,16 @@ def main() -> None:
         # 텔레그램으로 오류를 알려서 재처리 루프에 빠지지 않게 한다.
         try:
             message = update.get("message")
-            if not message or "text" not in message:
+            if not message:
                 continue
             if str(message["chat"]["id"]) != configured_chat_id:
+                continue
+
+            if "photo" in message:
+                _handle_ipo_image(ws_ipo_calendar, ws_ipo_apply, stock_calendar_id, message)
+                continue
+
+            if "text" not in message:
                 continue
 
             text = message["text"].strip()

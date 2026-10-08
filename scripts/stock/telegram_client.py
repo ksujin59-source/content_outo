@@ -42,6 +42,22 @@ def get_updates(offset: int, timeout: int = 10) -> list[dict]:
     return data["result"]
 
 
+def get_file_bytes(file_id: str) -> bytes:
+    """사진/파일 메시지의 file_id로 실제 바이트를 받아온다 — getFile로 임시 경로를
+    받은 뒤 그 경로에서 다운로드하는 2단계 절차(텔레그램 Bot API 표준 흐름)."""
+    token = _token()
+    resp = requests.get(f"{API_BASE}/bot{token}/getFile", params={"file_id": file_id}, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("ok"):
+        raise RuntimeError(f"getFile 실패: {data}")
+    file_path = data["result"]["file_path"]
+
+    file_resp = requests.get(f"{API_BASE}/file/bot{token}/{file_path}", timeout=20)
+    file_resp.raise_for_status()
+    return file_resp.content
+
+
 def send_message(text: str) -> None:
     resp = requests.post(
         f"{API_BASE}/bot{_token()}/sendMessage",

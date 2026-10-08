@@ -3,6 +3,9 @@ name: Process Stock Trades
 # 텔레그램으로 들어온 매매/청약/공모매도 기록 메시지와 이유식 기록 메시지("이유식 고구마,
 # 소고기" 형식)를 10분마다 폴링해서 구글시트(거래내역/보유종목/공모주신청/이유식기록)와
 # 구글 캘린더(이유식 기록 전용 + 주식&공모주 기록 전용, 서로 다른 캘린더)에 자동 반영한다.
+# 증권사 앱 스크린샷(사진 메시지)을 보내면 OCR(Tesseract, 무료)로 공모가/상장예정일/
+# 환불일을 읽어서 같은 방식으로 반영한다(image_extract.py) — 과금 없는 방식을 원해서
+# 비전 LLM 대신 OCR + 라벨 텍스트 기반 파싱을 씀.
 #
 # 필요한 저장소 시크릿 (Settings > Secrets and variables > Actions):
 #   - STOCK_TELEGRAM_BOT_TOKEN  (주식·이유식 기록 공용 봇 — 트렌드 알림 봇과 별개)
@@ -31,6 +34,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Install Tesseract OCR (한국어 데이터 포함)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-kor
 
       - name: Install dependencies
         run: pip install -r requirements.txt
