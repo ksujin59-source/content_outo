@@ -10,7 +10,8 @@
 알림 모두 어느 증권사(주간사) 건인지 메시지에 포함한다:
   - 공모가확정: 확정공모가가 비어있다가 채워지는 순간
   - 일주일전: 오늘이 청약시작일 - 7일
-  - 첫날: 오늘이 청약시작일 (cron이 평일 9/13/18시에 도므로 그날 첫 실행인 9시경에 나감)
+  - 첫날: 오늘이 청약시작일 (cron이 평일 9/13/18시에 도므로 그날 첫 실행인 9시경에 나감).
+    이 알림엔 공모가(확정 전이면 희망범위)와 청약기간(시작~종료일) 전체를 같이 보여준다.
   - 마지막날: 오늘이 청약종료일이면서 KST 13:50 이후(처음엔 13:50~14:10 사이로만
     한정했었는데, GitHub Actions의 schedule 트리거가 정각 슬롯에서 수 분~수십 분씩
     밀리거나 통째로 스킵되는 일이 실제로 잦아서(2026-10-01엔 14:30, 10-02엔 14:18에야
@@ -241,8 +242,8 @@ def main() -> None:
         if start_iso and today == start_iso:
             _send_alert(
                 ws_alarm_log, today, now_kst, listing.name, "첫날",
-                f"🔔 {listing.name} 청약 첫날입니다! ~{listing.subscribe_end[5:]}까지 청약 가능"
-                f" (주간사 {listing.lead_manager})",
+                f"🔔 {listing.name} 청약 첫날입니다! 청약기간 {listing.subscribe_start}~{listing.subscribe_end[5:]}\n"
+                f"공모가 {_price_label(listing)} (주간사 {listing.lead_manager})",
             )
 
         if end_iso and today == end_iso and afternoon_or_later:

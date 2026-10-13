@@ -1,14 +1,18 @@
 """공모주 상장일 매도 리마인더 — 상장 전날 저녁 20:00~20:30, 그리고 상장 당일 아침
-8시부터(늦어도 반드시) 알린다.
+8시 30분부터(늦어도 반드시) 알린다.
 
 GitHub Actions cron이 평일 10분 간격으로 이 스크립트를 반복 호출하는 것을 전제로 한다
 (check_prices.py와 같은 패턴). "당일" 체크는 원래 08:20~08:40 20분짜리 좁은 창이었는데,
 GitHub Actions의 schedule 트리거가 정각 전후로 밀리거나(심하면 수십 분) 아예 스킵되는
 경우가 실제로 관측돼서(ipo_new_alert.py의 "마지막날" 알림에서 같은 문제로 몇 차례
-놓친 적 있음) — 사용자가 "상장일 아침 8시에 꼭 알려달라"고 강조한 만큼, 08:00~09:50
+놓친 적 있음) — 사용자가 "상장일 아침 8시 30분에 알려달라"고 한 만큼, 08:30~09:50
 사이 하한만 확실히 두고 그 사이 아무 실행에서나 걸리면 보내도록 완화했다(워크플로우
 cron도 08시대뿐 아니라 09시대까지 한 시간 더 돌도록 슬롯을 추가해 이중 안전장치를 둠).
 "며칠에 한 번만" 판단은 공모주알람로그 탭으로 같은 날 중복 발송을 막는다.
+
+매도 리마인더에는 증권사와 함께 내가 청약한 공모가(청약가)도 같이 보여준다 — 실시간
+시초가 조회는 안 하고(실패/지연 위험, 사용자가 직접 비교 판단하길 선호) 이미 시트에
+있는 값을 그대로 쓴다.
 """
 
 from __future__ import annotations
@@ -51,7 +55,7 @@ def main() -> None:
     now_kst = dt.datetime.now(KST)
     today = now_kst.date().isoformat()
     tomorrow = (now_kst.date() + dt.timedelta(days=1)).isoformat()
-    in_morning_window = dt.time(8, 0) <= now_kst.time() <= dt.time(9, 50)
+    in_morning_window = dt.time(8, 30) <= now_kst.time() <= dt.time(9, 50)
     in_evening_window = dt.time(20, 0) <= now_kst.time() <= dt.time(20, 30)
 
     force_name, force_type = (None, None)
@@ -65,9 +69,14 @@ def main() -> None:
     sent = 0
 
     for row in pending:
-        name, broker, applicant, listing_date = row[1], row[2], row[3], row[6]
+        name, broker, applicant, price, listing_date = row[1], row[2], row[3], row[5], row[6]
         if not listing_date:
             continue
+
+        try:
+            price_label = f"{float(price):,.0f}원"
+        except (ValueError, TypeError):
+            price_label = price or "미확인"
 
         checks = []
         if force_name == name:
@@ -83,9 +92,9 @@ def main() -> None:
                 continue
 
             if alert_type == "전날":
-                text = f"⏰ 내일 {name} 상장! 매도 잊지 마세요\n{broker} · {applicant}"
+                text = f"⏰ 내일 {name} 상장! 매도 잊지 마세요\n{broker} · {applicant} · 청약가 {price_label}"
             else:
-                text = f"🔔 오늘 {name} 상장일! 지금 매도 확인하세요\n{broker} · {applicant}"
+                text = f"🔔 오늘 {name} 상장일! 지금 매도 확인하세요\n{broker} · {applicant} · 청약가 {price_label}"
 
             telegram_client.send_message(text)
             if not args.force_alert:
