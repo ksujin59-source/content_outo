@@ -90,6 +90,26 @@ def fetch_kr_quote(code: str) -> Quote:
     return Quote(price=price, prev_close=prev_close, pct_change=pct_change)
 
 
+def fetch_kr_index_quote(index_code: str) -> Quote:
+    """코스피/코스닥 같은 지수 시세 — 개별 종목용 /api/stock/{code}/basic과는 다른
+    엔드포인트(/api/index/{code}/basic)를 쓴다(종목 코드를 넣으면 409 StockConflict).
+    이 엔드포인트는 fluctuationsRatio에 부호가 이미 포함돼 있어(개별 종목 엔드포인트는
+    부호 없이 compareToPreviousPrice.code로 방향을 따로 봐야 함) sign 보정이 필요 없다."""
+    resp = requests.get(
+        f"https://m.stock.naver.com/api/index/{index_code}/basic",
+        headers={"User-Agent": _UA},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    price = float(data["closePrice"].replace(",", ""))
+    change_amount = float(data["compareToPreviousClosePrice"].replace(",", ""))
+    pct_change = float(data["fluctuationsRatio"])
+    prev_close = price - change_amount
+    return Quote(price=price, prev_close=prev_close, pct_change=pct_change)
+
+
 def fetch_kr_opening_price(code: str, on_date: str | None = None) -> float:
     """지정한 날짜(YYYY-MM-DD, 기본값 오늘)의 국내 종목 시가를 조회한다.
     공모주 상장일 시초가 자동 조회용 — basic 엔드포인트엔 시가가 없어서 따로 쓴다."""
