@@ -1,26 +1,15 @@
-"""구글 캘린더 연동 공통 유틸 (이유식 기록 + 주식/공모주 기록용).
-
-이유식 기록은 별도 텔레그램 봇을 새로 만들지 않고 주식 기록 봇(process_trades.py)의
-같은 폴링 루프 안에서 처리한다 — getUpdates offset 소비는 파괴적이라 한 봇에 폴러가
-둘 있으면 서로의 메시지를 가로채 유실시키기 때문이다 (이 파일 상단이 아니라
-process_trades.py의 모듈 docstring에 이 제약이 설명되어 있다).
+"""구글 캘린더 연동 공통 유틸 (주식/공모주 기록용).
 
 기존 저장소는 SDK 래퍼 없이 raw requests를 쓰는 스타일이라(telegram_client.py 참고),
 캘린더도 google-api-python-client를 새로 추가하지 않고 이미 설치돼 있는 google-auth의
 액세스 토큰을 받아 Calendar REST API를 직접 호출한다.
 
 인증은 sheets_client.py와 같은 서비스 계정 키를 재사용하되, 스코프만 캘린더용으로
-별도 구성한다. 이 모듈은 서로 다른 두 캘린더를 다룬다 — 어느 함수든 `calendar_id`를
-인자로 받으므로 호출부(process_trades.py)가 이유식 캘린더(FOOD_GOOGLE_CALENDAR_ID)와
-주식&공모주 캘린더(STOCK_GOOGLE_CALENDAR_ID)를 구분해서 넘긴다. 두 캘린더 모두 이
-서비스 계정 이메일과 "일정 변경" 권한으로 공유해둬야 한다 (food_setup_guide.md 참고).
+별도 구성한다. 호출부(process_trades.py, ipo_new_alert.py)는 주식&공모주 기록 전용
+캘린더(STOCK_GOOGLE_CALENDAR_ID)의 id를 `calendar_id` 인자로 넘긴다. 이 캘린더는 이
+서비스 계정 이메일과 "일정 변경" 권한으로 공유해둬야 한다 (stock_setup_guide.md 참고).
 
 두 가지 이벤트 패턴을 구분해서 제공한다:
-  - `upsert_event`: 이유식 기록용 — "하루 1개 이벤트로 누적". 날짜별 결정론적 이벤트
-    ID(foodlog + YYYYMMDD)로 구현해서, 검색 없이 GET-by-id로 존재 여부를 알 수 있고
-    같은 id로 두 번 생성을 시도하면 API가 409로 막아주므로 경쟁 상태로 같은 날 이벤트가
-    두 개 생기는 일도 없다. 이벤트 제목은 그날 먹은 음식 목록(중복 제거, 누적)이고,
-    설명(description)에 시간별 상세 로그를 쌓는다.
   - `create_event`: 주식 매매/공모주 청약·상장 기록용 — 거래 건당 독립된 이벤트를 새로
     만든다 (병합하지 않음). id를 지정하지 않고 생성하므로 같은 날 여러 건이어도 서로
     충돌하지 않는다.
@@ -31,6 +20,8 @@ process_trades.py의 모듈 docstring에 이 제약이 설명되어 있다).
     보유 현황"(ipo_holding_event_id로 만든 id)도 같은 함수로 관리한다 — 상장예정일이
     확인되는 즉시(아직 매도 전이라 청약가로) 미리 캘린더에 뜨고, 실제로 매도하면
     process_trades.py가 같은 id로 매도가/수익으로 덮어써서 이벤트가 하나로 이어진다.
+  - `list_events_for_date`: 아침 캘린더 요약 알림(calendar_daily_digest.py)용 — 그날
+    날짜로 걸린 이벤트 제목을 전부 가져온다.
 """
 
 from __future__ import annotations
@@ -50,9 +41,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/calendar",
 ]
 
-FOOD_LOG_PREFIX = "이유식 기록 - "
-
-
 def _load_credentials() -> Credentials:
     raw_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     if raw_json:
@@ -65,7 +53,7 @@ def _load_credentials() -> Credentials:
 
     raise RuntimeError(
         "GOOGLE_SERVICE_ACCOUNT_JSON 또는 GOOGLE_APPLICATION_CREDENTIALS 중 "
-        "하나가 설정되어 있어야 합니다. food_setup_guide.md를 참고하세요."
+        "하나가 설정되어 있어야 합니다. stock_setup_guide.md를 참고하세요."
     )
 
 
@@ -75,96 +63,8 @@ def _access_token() -> str:
     return creds.token
 
 
-def _event_id_for_date(date_str: str) -> str:
-    # Calendar API 이벤트 id 허용 문자: 소문자 a-v, 숫자 0-9, 5~1024자.
-    return "foodlog" + date_str.replace("-", "")
-
-
-def _dedupe_keep_order(items: list[str]) -> list[str]:
-    seen: dict[str, None] = {}
-    for item in items:
-        seen.setdefault(item, None)
-    return list(seen.keys())
-
-
 def _next_day(date_str: str) -> str:
     return (dt.date.fromisoformat(date_str) + dt.timedelta(days=1)).isoformat()
-
-
-def get_event(calendar_id: str, date_str: str) -> dict | None:
-    token = _access_token()
-    event_id = _event_id_for_date(date_str)
-    resp = requests.get(
-        f"{API_BASE}/calendars/{calendar_id}/events/{event_id}",
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=10,
-    )
-    if resp.status_code == 404:
-        return None
-    resp.raise_for_status()
-    event = resp.json()
-    if event.get("status") == "cancelled":
-        return None
-    return event
-
-
-def upsert_event(calendar_id: str, date_str: str, items: list[str], time_str: str) -> None:
-    """이유식 기록 — 하루 1개 이벤트에 음식을 누적한다.
-
-    제목은 그날 누적된 음식 목록(중복 제거)이고, 설명에는 시간별 줄이 계속 추가된다.
-    """
-    token = _access_token()
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    event_id = _event_id_for_date(date_str)
-    existing = get_event(calendar_id, date_str)
-    new_line = f"{time_str} - {', '.join(items)}"
-
-    if existing is None:
-        body = {
-            "id": event_id,
-            "status": "confirmed",
-            "summary": FOOD_LOG_PREFIX + ", ".join(items),
-            "description": new_line,
-            "start": {"date": date_str},
-            "end": {"date": _next_day(date_str)},
-        }
-        resp = requests.post(
-            f"{API_BASE}/calendars/{calendar_id}/events",
-            headers=headers,
-            json=body,
-            timeout=10,
-        )
-        if resp.status_code == 409:
-            # 같은 id로 이전에 삭제(취소)된 이벤트가 남아있으면 새로 만들 수 없다 —
-            # 그 자리를 PATCH로 되살린다(status를 confirmed로 되돌리며 내용도 채움).
-            resp = requests.patch(
-                f"{API_BASE}/calendars/{calendar_id}/events/{event_id}",
-                headers=headers,
-                json=body,
-                timeout=10,
-            )
-        resp.raise_for_status()
-        return
-
-    existing_summary = existing.get("summary") or ""
-    existing_foods = (
-        existing_summary[len(FOOD_LOG_PREFIX):].split(", ")
-        if existing_summary.startswith(FOOD_LOG_PREFIX)
-        else []
-    )
-    merged_foods = _dedupe_keep_order(existing_foods + items)
-    new_summary = FOOD_LOG_PREFIX + ", ".join(merged_foods)
-
-    existing_description = (existing.get("description") or "").rstrip()
-    new_description = f"{existing_description}\n{new_line}" if existing_description else new_line
-
-    resp = requests.patch(
-        f"{API_BASE}/calendars/{calendar_id}/events/{event_id}",
-        headers=headers,
-        json={"summary": new_summary, "description": new_description},
-        timeout=10,
-    )
-    resp.raise_for_status()
 
 
 def create_event(calendar_id: str, date_str: str, summary: str, description: str = "") -> None:
@@ -222,6 +122,31 @@ def upsert_simple_event(
             timeout=10,
         )
     resp.raise_for_status()
+
+
+def list_events_for_date(calendar_id: str, date_str: str) -> list[str]:
+    """해당 날짜(종일 이벤트 기준)에 걸린 이벤트 제목 목록 — 아침 캘린더 요약 알림용.
+
+    이 캘린더의 이벤트는 모두 종일(date-only) 이벤트라, timeMin/timeMax를 그날
+    00:00~다음날 00:00(UTC)로 주면 날짜가 정확히 걸리는 이벤트만 조회된다.
+    """
+    token = _access_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    params = {
+        "timeMin": f"{date_str}T00:00:00Z",
+        "timeMax": f"{_next_day(date_str)}T00:00:00Z",
+        "singleEvents": "true",
+        "orderBy": "startTime",
+    }
+    resp = requests.get(
+        f"{API_BASE}/calendars/{calendar_id}/events",
+        headers=headers,
+        params=params,
+        timeout=10,
+    )
+    resp.raise_for_status()
+    items = resp.json().get("items", [])
+    return [item.get("summary", "(제목 없음)") for item in items]
 
 
 def ipo_holding_event_id(name: str, applicant: str, broker: str) -> str:

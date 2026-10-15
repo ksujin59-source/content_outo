@@ -1,4 +1,4 @@
-"""텔레그램으로 들어온 매매/공모주/이유식 기록 메시지를 파싱해서 구글시트(+캘린더)에
+"""텔레그램으로 들어온 매매/공모주 기록 메시지를 파싱해서 구글시트(+캘린더)에
 반영한다.
 
 지원하는 메시지 형식:
@@ -35,10 +35,6 @@
     종목명과 일치하는 토큰, KNOWN_BROKERS에 있는 토큰, "시초가"/숫자인 토큰을 각각
     알아보고 남는 하나를 신청인으로 본다(_classify_ipo_sell_tokens 참고). 알림에
     답장하기 애매할 때 쓰는 방식.
-  - 이유식 기록: "이유식 고구마, 소고기" (접두어 "이유식" + 쉼표/줄바꿈/·//로 구분한
-    음식 목록). 알레르기 테스트용으로 날짜별 구글 캘린더 이벤트(하루 1개로 누적)와
-    시트(이유식기록 탭)에 기록한다. 매매 형식과 겹치지 않도록 "이유식" 접두어로 구분한다
-    — 이 접두어 없이 보내면 매매 형식 파싱에 실패해 사용법 안내만 돌아간다.
   - 공모주 정보 이미지: 증권사 앱 스크린샷(사진 메시지)을 보내면 image_extract.py가
     OCR(Tesseract, 무료)로 종목명/공모가/상장예정일/환불일을 읽어서 공모주캘린더 탭에
     반영하고, 대기중인 신청 건이 있으면 캘린더 [상장]/[환불일] 이벤트와 공모주신청 탭
@@ -46,12 +42,10 @@
     텍스트 주변을 찾는 방식이라 증권사마다 화면이 달라도 대체로 통하지만, 비전 LLM보다
     인식률이 낮을 수 있다(_handle_ipo_image 참고).
 
-이 네 종류 모두 같은 텔레그램 봇(STOCK_TELEGRAM_BOT_TOKEN)의 getUpdates를 공유하므로,
+이 종류들 모두 같은 텔레그램 봇(STOCK_TELEGRAM_BOT_TOKEN)의 getUpdates를 공유하므로,
 반드시 이 파일 하나의 폴링 루프 안에서 처리해야 한다 — getUpdates는 offset을 넘기면
 그 이전 업데이트를 다른 호출자에게 다시 돌려주지 않으므로, 별도 스크립트로 나누면
-서로의 메시지를 가로채 유실시킨다. (이유식 기록도 원래는 전용 봇을 새로 만들 계획이었으나,
-봇 발급 절차를 줄이기 위해 이 주식봇 챗을 그대로 재사용하기로 함 — 그래서 "이유식" 접두어로
-매매 메시지와 구분한다.)
+서로의 메시지를 가로채 유실시킨다.
 
 GitHub Actions cron(process-trades.yml)이 주기 실행하는 것을 전제로 한다. 로컬 실행 시엔
 같은 폴더의 .env를 자동으로 읽는다 (없으면 무시하고 이미 설정된 환경변수를 그대로 씀).
@@ -63,7 +57,6 @@ import datetime as dt
 import os
 import re
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -75,7 +68,6 @@ import telegram_client
 
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
-SEOUL = ZoneInfo("Asia/Seoul")
 TICKER_MAP_PATH = Path(__file__).parent / "kr_ticker_map.json"
 TRADE_RE = re.compile(r"^(매수|매도)\s+(\S+)\s+(\S+)\s+(\d+)\s+([\d.]+)(?:\s+(.+))?$")
 IPO_SELL_PREFIX_RE = re.compile(r"^공모매도\s+(.+)$")
@@ -89,9 +81,7 @@ IPO_SCHEDULE_ALERT_NAME_PATTERNS = [
     re.compile(r"(\S+) 청약 첫날입니다"),
     re.compile(r"(\S+) 청약 마지막날입니다"),
 ]
-FOOD_RE = re.compile(r"^이유식\s+(.+)$", re.DOTALL)
-FOOD_SEPARATOR_RE = re.compile(r"[,\n·/]+")
-RESERVED_FIRST_WORDS = {"매수", "매도", "공모매도", "이유식"}
+RESERVED_FIRST_WORDS = {"매수", "매도", "공모매도"}
 
 # 공모주 청약 메시지에서 "증권사"를 알아보기 위한 참고 목록 — 정확히 일치하거나(우선),
 # 이 중 하나를 포함/이 중 하나에 포함되면(부분 일치) 그 토큰을 증권사로 본다. 어순이
@@ -116,7 +106,6 @@ USAGE_HINT = (
     "청약가는 자동 확인되고 직접 써도 됨), 또는 공모주 알림에 답장으로 `미래에셋 수진 10주`\n"
     "공모주 매도: 상장일 알림에 답장으로 `수진 10 시초가`, 또는 직접\n"
     "`공모매도 바로팜 수진 시초가` (둘 다 어순 무관)\n"
-    "이유식 기록: `이유식 고구마, 소고기`\n"
     "공모주 정보: 증권사 앱 스크린샷을 사진으로 보내면 자동 인식\n"
     "전체 양식 다시 보려면: `양식`"
 )
@@ -140,8 +129,6 @@ FORMAT_GUIDE = (
     "`공모매도 바로팜 수진 시초가`\n"
     "`공모매도 바로팜 수진 미래에셋 25000` — 동일인 여러 증권사 청약 시 증권사 포함,\n"
     "둘 다 어순 무관(종목명/신청인/증권사/가격 순서 섞여도 됨)\n\n"
-    "🍼 이유식 기록\n"
-    "`이유식 고구마, 소고기` (쉼표/줄바꿈/·// 로 여러 개 구분)\n\n"
     "🖼️ 공모주 정보 (스크린샷)\n"
     "증권사 앱 화면을 사진으로 그냥 보내면 공모가/상장예정일/환불일을 자동으로 읽어서\n"
     "반영함 — 어느 증권사 앱이든 상관없음\n\n"
@@ -179,6 +166,15 @@ def _is_broker_token(token: str) -> bool:
     return any(token in b or b in token for b in KNOWN_BROKERS)
 
 
+def _broker_matches(stored: str, token: str) -> bool:
+    """시트에 저장된 증권사명과 사용자가 보낸 토큰을 비교한다 — "미래에셋증권"으로
+    기록해둔 신청 건에 "미래에셋"처럼 축약형으로 답장해도 같은 건으로 찾기 위해
+    부분 일치(어느 한쪽이 다른 쪽을 포함)까지 허용한다. 정확히 같은 문자열 비교만
+    하면(예전 동작) 배정수량/공모매도 조회가 "대기중인 신청을 찾지 못했습니다"로
+    실패하는 문제가 있었다."""
+    return stored == token or stored in token or token in stored
+
+
 def _is_price_token(token: str) -> bool:
     """가격 토큰 판정 — "90500"뿐 아니라 "90500원"처럼 단위를 바로 붙여 보내는 습관도
     받아주기 위해 끝의 "원"은 있어도 없어도 되게 한다."""
@@ -187,6 +183,12 @@ def _is_price_token(token: str) -> bool:
 
 def _parse_price_token(token: str) -> float:
     return float(token.rstrip("원").replace(",", ""))
+
+
+def _format_price_token(value: float) -> str:
+    """정수 가격을 "25000.0"처럼 어색하게 보여주지 않기 위한 포맷 — 안내/확인 메시지에
+    되돌려 보일 때만 쓴다(실제 매도가 계산은 float 그대로 사용)."""
+    return str(int(value)) if value == int(value) else str(value)
 
 
 def _classify_ipo_apply_tokens(tokens: list[str], ws_calendar=None) -> dict | None:
@@ -308,37 +310,6 @@ def _classify_trade_tokens(tokens: list[str]) -> dict | None:
     return {"symbol": symbol, "broker": broker, "qty": qty, "price": price, "memo": memo}
 
 
-def _parse_food_items(text: str) -> list[str]:
-    parts = FOOD_SEPARATOR_RE.split(text)
-    return [p.strip() for p in parts if p.strip()]
-
-
-def _dedupe_keep_order(items: list[str]) -> list[str]:
-    seen: dict[str, None] = {}
-    for item in items:
-        seen.setdefault(item, None)
-    return list(seen.keys())
-
-
-def _handle_food_log(ws_food, food_calendar_id: str, message: dict, food_text: str, raw_text: str) -> None:
-    items = _parse_food_items(food_text)
-    if not items:
-        telegram_client.send_message(USAGE_HINT)
-        return
-
-    msg_dt = dt.datetime.fromtimestamp(message["date"], tz=SEOUL)
-    date_str = msg_dt.date().isoformat()
-    time_str = msg_dt.strftime("%H:%M")
-
-    for item in items:
-        ws_food.append_row([date_str, time_str, item, raw_text])
-
-    unique_items = _dedupe_keep_order(items)
-    calendar_client.upsert_event(food_calendar_id, date_str, unique_items, time_str)
-
-    telegram_client.send_message(f"✅ {date_str} 이유식 기록 완료: {', '.join(unique_items)}")
-
-
 def _find_pending_ipo_name(ws_apply, token: str) -> str | None:
     for row in ws_apply.get_all_values()[1:]:
         if len(row) >= 8 and row[7] == "대기" and row[1] and (row[1] == token or token in row[1] or row[1] in token):
@@ -356,7 +327,7 @@ def _classify_ipo_sell_tokens(tokens: list[str], ws_apply) -> dict | None:
     price_token = None
     for t in remaining:
         if t == "시초가" or _is_price_token(t):
-            price_token = t if t == "시초가" else str(_parse_price_token(t))
+            price_token = t if t == "시초가" else _format_price_token(_parse_price_token(t))
             remaining.remove(t)
             break
     if price_token is None:
@@ -418,7 +389,7 @@ def _classify_ipo_reply_sell_tokens(tokens: list[str]) -> dict | None:
     price_token = None
     for t in remaining:
         if t == "시초가" or _is_price_token(t):
-            price_token = t if t == "시초가" else str(_parse_price_token(t))
+            price_token = t if t == "시초가" else _format_price_token(_parse_price_token(t))
             remaining.remove(t)
             break
     if price_token is None:
@@ -660,7 +631,7 @@ def _handle_ipo_allotment(
     rows = ws_apply.get_all_values()[1:]
     candidates = [
         (idx, row) for idx, row in enumerate(rows, start=2)
-        if len(row) >= 8 and row[7] == "대기" and row[2] == broker
+        if len(row) >= 8 and row[7] == "대기" and _broker_matches(row[2], broker)
         and row[1] and (row[1] == name or name in row[1] or row[1] in name)
         and (applicant is None or row[3] == applicant)
     ]
@@ -710,7 +681,7 @@ def _find_ipo_sell_candidates(ws_apply, name: str, applicant: str, broker: str |
     return [
         (idx, row) for idx, row in enumerate(rows, start=2)
         if len(row) >= 8 and row[1] == name and row[3] == applicant and row[7] == "대기"
-        and (broker is None or row[2] == broker)
+        and (broker is None or _broker_matches(row[2], broker))
     ]
 
 
@@ -796,7 +767,6 @@ def main() -> None:
     ws_state = sheets_client.get_or_create_worksheet(spreadsheet, "상태")
     ws_ipo_apply = sheets_client.get_or_create_worksheet(spreadsheet, "공모주신청")
     ws_ipo_calendar = sheets_client.get_or_create_worksheet(spreadsheet, "공모주캘린더")
-    ws_food = sheets_client.get_or_create_worksheet(spreadsheet, "이유식기록")
 
     last_update_id = int(sheets_client.get_state(ws_state, "last_update_id", "0") or "0")
     updates = telegram_client.get_updates(offset=last_update_id + 1)
@@ -806,7 +776,6 @@ def main() -> None:
         return
 
     configured_chat_id = os.environ.get("STOCK_TELEGRAM_CHAT_ID", "")
-    food_calendar_id = os.environ.get("FOOD_GOOGLE_CALENDAR_ID", "")
     stock_calendar_id = os.environ.get("STOCK_GOOGLE_CALENDAR_ID", "")
     max_update_id = last_update_id
     today = dt.date.today().isoformat()
@@ -835,11 +804,6 @@ def main() -> None:
 
             if text == FORMAT_GUIDE_TRIGGER:
                 telegram_client.send_message(FORMAT_GUIDE)
-                continue
-
-            food_match = FOOD_RE.match(text)
-            if food_match:
-                _handle_food_log(ws_food, food_calendar_id, message, food_match.group(1), text)
                 continue
 
             reply_to = message.get("reply_to_message") or {}

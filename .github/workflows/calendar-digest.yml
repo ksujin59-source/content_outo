@@ -1,0 +1,41 @@
+name: Calendar Daily Digest
+
+# 매일 아침 7시(KST)에 주식&공모주 기록 캘린더(STOCK_GOOGLE_CALENDAR_ID)에 그날 날짜로
+# 걸린 일정(매수/매도/청약/상장 기록 + 공모주 신규/확정/청약/상장 일정)을 모아 텔레그램
+# 으로 요약해서 보낸다.
+#
+# cron: "0 22 * * *" — UTC 22:00 = KST 07:00(다음날), 매일 1회.
+#
+# 필요한 저장소 시크릿 (Settings > Secrets and variables > Actions):
+#   - STOCK_TELEGRAM_BOT_TOKEN
+#   - STOCK_TELEGRAM_CHAT_ID
+#   - GOOGLE_SERVICE_ACCOUNT_JSON
+#   - STOCK_GOOGLE_CALENDAR_ID
+
+on:
+  schedule:
+    - cron: "0 22 * * *"
+  workflow_dispatch:
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Send calendar digest
+        env:
+          STOCK_TELEGRAM_BOT_TOKEN: ${{ secrets.STOCK_TELEGRAM_BOT_TOKEN }}
+          STOCK_TELEGRAM_CHAT_ID: ${{ secrets.STOCK_TELEGRAM_CHAT_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          STOCK_GOOGLE_CALENDAR_ID: ${{ secrets.STOCK_GOOGLE_CALENDAR_ID }}
+        run: python scripts/stock/calendar_daily_digest.py
