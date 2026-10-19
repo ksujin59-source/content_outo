@@ -1,0 +1,39 @@
+name: IPO Schedule Weekly Recheck
+
+# 매주 금요일 아침, 공모주캘린더 탭에 "오늘 이후" 상장예정일을 가진 모든 종목을
+# 38.co.kr에서 다시 조회해서 날짜가 바뀌었는지 확인한다. ipo_new_alert.py는 상장예정일이
+# 비어있을 때만 재조회하는데, 한 번 확정됐다고 기록한 날짜가 나중에 연기/변경되는 경우를
+# 놓치는 구멍이 있어서, 주 1회 무조건 재확인하는 안전망을 둔다. 날짜가 실제로 바뀐
+# 건에 대해서만 텔레그램으로 알린다(scripts/stock/ipo_schedule_recheck.py 참고).
+#
+# 필요한 저장소 시크릿은 ipo-new-alert.yml과 동일 (STOCK_TELEGRAM_*, GOOGLE_*,
+# STOCK_GOOGLE_CALENDAR_ID) — 이미 등록되어 있다면 추가 등록 불필요.
+
+on:
+  schedule:
+    - cron: "10 0 * * 5"
+  workflow_dispatch:
+
+jobs:
+  recheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Recheck upcoming IPO schedule
+        env:
+          STOCK_TELEGRAM_BOT_TOKEN: ${{ secrets.STOCK_TELEGRAM_BOT_TOKEN }}
+          STOCK_TELEGRAM_CHAT_ID: ${{ secrets.STOCK_TELEGRAM_CHAT_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          STOCK_GOOGLE_CALENDAR_ID: ${{ secrets.STOCK_GOOGLE_CALENDAR_ID }}
+        run: python scripts/stock/ipo_schedule_recheck.py

@@ -257,6 +257,12 @@ def main() -> None:
     # 않는다 — 상장일은 보통 청약종료일 며칠 뒤라, 그 사이(청약 마감~상장) 기간엔 위
     # listings 루프에 안 걸려서 상장예정일/환불일 캘린더 동기화가 끊겼다. 시트에 남아있는
     # 상장예정일/환불일이 아직 안 지난 행을 한 번 더 훑어서 보강한다.
+    #
+    # 상장예정일/환불일이 "아직 미확정"이라 비어있는 행은 위 listings 루프에서만 상세
+    # 페이지 재조회(fetch_detail)로 채워지는데, 청약종료일이 지나 목록에서 빠지면 그
+    # 루프 자체를 안 타서 영원히 빈 칸으로 남는 버그가 있었다(실제로 디티에스가 이미
+    # 상장일 2026-10-23이 확정됐는데도 목록에서 빠진 뒤로 시트엔 계속 공백이었음) —
+    # 그래서 여기서도 비어있으면 직접 상세 페이지를 재조회해서 채운다.
     live_nos = {listing.no for listing in listings}
     for row in rows:
         if not row or row[0] in live_nos:
@@ -265,6 +271,16 @@ def main() -> None:
         lead_manager = row[6] if len(row) > 6 else ""
         listing_date_iso = row[7] if len(row) > 7 else ""
         refund_date_iso = row[8] if len(row) > 8 else ""
+
+        if not listing_date_iso or not refund_date_iso:
+            detail = ipo_calendar.fetch_detail(no)
+            if not listing_date_iso and detail["listing_date"]:
+                listing_date_iso = _to_iso(detail["listing_date"])
+                ws_calendar.update(f"H{existing[no]}", [[listing_date_iso]])
+            if not refund_date_iso and detail["refund_date"]:
+                refund_date_iso = _to_iso(detail["refund_date"])
+                ws_calendar.update(f"I{existing[no]}", [[refund_date_iso]])
+
         if not listing_date_iso and not refund_date_iso:
             continue
         if listing_date_iso and listing_date_iso >= today and stock_calendar_id:

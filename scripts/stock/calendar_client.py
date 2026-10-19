@@ -67,6 +67,10 @@ def _next_day(date_str: str) -> str:
     return (dt.date.fromisoformat(date_str) + dt.timedelta(days=1)).isoformat()
 
 
+def _prev_day(date_str: str) -> str:
+    return (dt.date.fromisoformat(date_str) - dt.timedelta(days=1)).isoformat()
+
+
 def create_event(calendar_id: str, date_str: str, summary: str, description: str = "") -> None:
     """주식 매매/공모주 청약·상장 기록 — 거래 건당 새 종일 이벤트를 하나 만든다.
 
@@ -127,14 +131,18 @@ def upsert_simple_event(
 def list_events_for_date(calendar_id: str, date_str: str) -> list[str]:
     """해당 날짜(종일 이벤트 기준)에 걸린 이벤트 제목 목록 — 아침 캘린더 요약 알림용.
 
-    이 캘린더의 이벤트는 모두 종일(date-only) 이벤트라, timeMin/timeMax를 그날
-    00:00~다음날 00:00(UTC)로 주면 날짜가 정확히 걸리는 이벤트만 조회된다.
+    종일(date-only) 이벤트의 "하루"는 캘린더의 타임존(KST) 기준인데, timeMin/timeMax는
+    타임존 오프셋이 있는 RFC3339라 "Z"(UTC)로 주면 하루 경계가 KST 기준과 9시간
+    어긋난다 — 그러면 예를 들어 다음날(KST) 이벤트가 전날 UTC 오후 구간과 겹쳐서
+    오늘 조회에도 잘못 섞여 나온다. 그래서 하루 전~다음날까지 넉넉히 조회한 뒤,
+    각 이벤트의 start.date 문자열이 정확히 date_str인 것만 클라이언트에서 걸러낸다
+    (문자열 그대로 비교하므로 타임존 어긋남 문제 자체가 없다).
     """
     token = _access_token()
     headers = {"Authorization": f"Bearer {token}"}
     params = {
-        "timeMin": f"{date_str}T00:00:00Z",
-        "timeMax": f"{_next_day(date_str)}T00:00:00Z",
+        "timeMin": f"{_prev_day(date_str)}T00:00:00Z",
+        "timeMax": f"{_next_day(_next_day(date_str))}T00:00:00Z",
         "singleEvents": "true",
         "orderBy": "startTime",
     }
@@ -146,7 +154,10 @@ def list_events_for_date(calendar_id: str, date_str: str) -> list[str]:
     )
     resp.raise_for_status()
     items = resp.json().get("items", [])
-    return [item.get("summary", "(제목 없음)") for item in items]
+    return [
+        item.get("summary", "(제목 없음)") for item in items
+        if item.get("start", {}).get("date") == date_str
+    ]
 
 
 def ipo_holding_event_id(name: str, applicant: str, broker: str) -> str:

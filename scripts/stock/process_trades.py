@@ -69,6 +69,7 @@ import telegram_client
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
 TICKER_MAP_PATH = Path(__file__).parent / "kr_ticker_map.json"
+IPO_SELL_FEE = 2000  # 공모주 매도 시 대략적인 수수료(원) — 수익금액/수익률 계산에서 제외
 TRADE_RE = re.compile(r"^(매수|매도)\s+(\S+)\s+(\S+)\s+(\d+)\s+([\d.]+)(?:\s+(.+))?$")
 IPO_SELL_PREFIX_RE = re.compile(r"^공모매도\s+(.+)$")
 IPO_REPLY_SELL_RE = re.compile(r"^(\S+)\s+(\d+)\s+(시초가|[\d.]+)$")
@@ -706,17 +707,21 @@ def _finalize_ipo_sale(ws_apply, ws_calendar, stock_calendar_id: str, row_idx, r
     calendar_row = _find_ipo_calendar_row(ws_calendar, name)
     lead_manager = calendar_row[6] if calendar_row and len(calendar_row) > 6 else ""
 
-    profit_pct = (sell_price - apply_price) / apply_price * 100 if apply_price else 0.0
-    profit_amount = (sell_price - apply_price) * apply_qty
-    ws_apply.update(f"H{row_idx}:K{row_idx}", [["매도완료", f"{sell_price:.2f}", today, f"{profit_pct:.2f}"]])
+    invested = apply_price * apply_qty
+    profit_amount = (sell_price - apply_price) * apply_qty - IPO_SELL_FEE
+    profit_pct = profit_amount / invested * 100 if invested else 0.0
+    ws_apply.update(
+        f"H{row_idx}:L{row_idx}",
+        [["매도완료", f"{sell_price:.2f}", today, f"{profit_pct:.2f}", f"{profit_amount:.0f}"]],
+    )
     event_summary = f"[상장] {name} {apply_qty}주 {sell_price:,.0f}원 {broker}"
     calendar_client.upsert_simple_event(
         stock_calendar_id, calendar_client.ipo_holding_event_id(name, applicant, broker),
         event_summary, listing_date, _next_iso(listing_date),
-        description=f"수익 {profit_amount:,.0f}원 ({profit_pct:+.1f}%)",
+        description=f"수익 {profit_amount:,.0f}원 ({profit_pct:+.1f}%, 수수료 {IPO_SELL_FEE:,}원 제외)",
     )
 
-    reply = f"✅ {name} 매도완료 · {sell_price:,.0f}원\n수익률 {profit_pct:+.1f}%"
+    reply = f"✅ {name} 매도완료 · {sell_price:,.0f}원\n수익 {profit_amount:,.0f}원 ({profit_pct:+.1f}%, 수수료 {IPO_SELL_FEE:,}원 제외)"
     if lead_manager:
         reply += f"\n주간사 {lead_manager}"
     if expected_qty is not None and expected_qty != apply_qty:
