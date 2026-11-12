@@ -141,6 +141,7 @@ def main() -> None:
             direction = "급등" if quote.pct_change > 0 else "급락"
             text = (
                 f"🚨 {name} {direction} 알림\n"
+                f"증권사 {broker or '미정'}\n"
                 f"현재가 {quote.price:,.2f} (전일 대비 {quote.pct_change:+.2f}%)"
             )
             _send(text, args.dry_run)

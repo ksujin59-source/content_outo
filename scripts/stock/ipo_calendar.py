@@ -89,9 +89,43 @@ def _extract_field(html: str, label: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+def _extract_rate_field(html: str, label: str) -> str:
+    """기관경쟁률/의무보유확약처럼 "수요예측결과" 미니테이블에 있는 값 — 라벨이
+    <font>로 감싸여 있고 그 다음 <td>가 값이라 _extract_field의 패턴과 다르다.
+    수요예측이 아직 안 끝난 경우 값이 비어있거나 "0.00%"로 나올 수 있다."""
+    pattern = re.compile(
+        re.escape(label) + r"</font>&nbsp;\s*</td>\s*<td[^>]*>\s*([^<]*?)\s*</td>",
+    )
+    m = pattern.search(html)
+    if not m:
+        return ""
+    value = m.group(1).strip()
+    return "" if value in ("", "0.00%", "-") else value
+
+
+def _extract_float_ratio(html: str) -> str:
+    """"공모후 유통가능 물량" 표의 맨 아래 합계 행에서 유통가능물량 비율(%)을 뽑는다.
+    이 표는 투자설명서 내용을 그대로 붙여넣은 자유 서식이라 회사마다 행 구성(최대주주,
+    5%이상주주 등 세부 카테고리 수)이 다를 수 있다 — 그래서 "합계" 행 전체를 통째로
+    찾은 뒤, 그 안의 숫자%를 전부 뽑아서 마지막 값(공모전/공모후/매각제한물량 다음에
+    나오는 네 번째 비율 = 유통가능물량)을 취한다. 아직 투자설명서가 안 올라온
+    종목(청약 시작 전)은 이 표 자체가 없어서 빈 문자열을 반환한다."""
+    section_m = re.search(
+        r"공모후\s*유통가능\s*물량(.*?)(?=<P><FONT color=\"#3366ff\"|\Z)", html, re.S,
+    )
+    if not section_m:
+        return ""
+    rows = re.findall(r"합계.*?</TR>", section_m.group(1), re.S | re.I)
+    if not rows:
+        return ""
+    percents = re.findall(r"(\d+\.\d+)%", rows[-1])
+    return f"{percents[-1]}%" if percents else ""
+
+
 def fetch_detail(no: str) -> dict[str, str]:
-    """상세 페이지에서 상장예정일/환불일을 보강 조회한다. 마감 직후엔 상장일이
-    아직 미확정이라 빈 문자열일 수 있다."""
+    """상세 페이지에서 상장예정일/환불일과(공모주 분석용) 기관경쟁률/의무보유확약비율/
+    유통가능물량비율을 보강 조회한다. 전부 수요예측·투자설명서가 공개된 뒤에야 채워지는
+    값이라, 마감 직후거나 아직 청약이 시작되지 않은 경우 빈 문자열일 수 있다."""
     resp = _session().get(DETAIL_URL.format(no=no), timeout=15)
     resp.raise_for_status()
     html = resp.content.decode("euc-kr", errors="replace")
@@ -99,6 +133,9 @@ def fetch_detail(no: str) -> dict[str, str]:
     return {
         "listing_date": _extract_field(html, "상장일"),
         "refund_date": _extract_field(html, "환불일"),
+        "institutional_rate": _extract_rate_field(html, "기관경쟁률"),
+        "lockup_ratio": _extract_rate_field(html, "의무보유확약"),
+        "float_ratio": _extract_float_ratio(html),
     }
 
 

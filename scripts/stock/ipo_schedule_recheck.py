@@ -85,9 +85,13 @@ def main() -> None:
             continue
         no = row[0]
         name = row[1] if len(row) > 1 else ""
+        fixed_price = row[4] if len(row) > 4 else ""
+        price_range = row[5] if len(row) > 5 else ""
         lead_manager = row[6] if len(row) > 6 else ""
         old_listing = row[7] if len(row) > 7 else ""
         old_refund = row[8] if len(row) > 8 else ""
+        price = fixed_price if fixed_price and fixed_price != "-" else price_range
+        price_label = f"{price}원" if price and price != "-" else "미정"
 
         if old_listing and old_listing < today:
             continue  # 이미 지난 상장일은 재확인 대상 아님 — "오늘 이후"만 본다
@@ -100,7 +104,8 @@ def main() -> None:
         if new_listing and new_listing != old_listing:
             ws_calendar.update(f"H{idx}", [[new_listing]])
             telegram_client.send_message(
-                f"⚠️ {name} 상장예정일 변경: {old_listing or '미정'} → {new_listing} (주간사 {lead_manager})"
+                f"⚠️ {name} 상장예정일 변경: {old_listing or '미정'} → {new_listing}\n"
+                f"공모가 {price_label} (증권사(주간사) {lead_manager or '미정'})"
             )
             changed += 1
         if new_refund and new_refund != old_refund:

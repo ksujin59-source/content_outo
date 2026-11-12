@@ -545,7 +545,13 @@ def _handle_ipo_image(ws_calendar, ws_apply, stock_calendar_id: str, message: di
     refund_date = refreshed[8] if refreshed and len(refreshed) > 8 else ""
     _sync_apply_calendar_for_name(ws_apply, stock_calendar_id, name, listing_date, refund_date)
 
-    reply = f"🖼️ '{name}' 이미지 인식 완료"
+    fixed_price = refreshed[4] if refreshed and len(refreshed) > 4 else ""
+    price_range = refreshed[5] if refreshed and len(refreshed) > 5 else ""
+    lead_manager = refreshed[6] if refreshed and len(refreshed) > 6 else ""
+    current_price = fixed_price if fixed_price and fixed_price != "-" else price_range
+    current_price_label = f"{current_price}원" if current_price and current_price != "-" else "미정"
+
+    reply = f"🖼️ '{name}' 이미지 인식 완료\n공모가 {current_price_label} · 증권사(주간사) {lead_manager or '미정'}"
     reply += "\n" + ("업데이트: " + ", ".join(updates) if updates else "이미 알고 있던 정보와 같아 변경 없음")
     if info.get("allotment_qty"):
         reply += (
@@ -673,7 +679,8 @@ def _handle_ipo_allotment(
         )
 
     telegram_client.send_message(
-        f"✅ {canon_name} 배정 수량 반영: {old_qty}주 → {qty}주 ({canon_broker} · {canon_applicant})"
+        f"✅ {canon_name} 배정 수량 반영: {old_qty}주 → {qty}주\n"
+        f"증권사 {canon_broker} · {canon_applicant} · 청약가 {price:,.0f}원"
     )
 
 
@@ -721,7 +728,11 @@ def _finalize_ipo_sale(ws_apply, ws_calendar, stock_calendar_id: str, row_idx, r
         description=f"수익 {profit_amount:,.0f}원 ({profit_pct:+.1f}%, 수수료 {IPO_SELL_FEE:,}원 제외)",
     )
 
-    reply = f"✅ {name} 매도완료 · {sell_price:,.0f}원\n수익 {profit_amount:,.0f}원 ({profit_pct:+.1f}%, 수수료 {IPO_SELL_FEE:,}원 제외)"
+    reply = (
+        f"✅ {name} 매도완료 · {sell_price:,.0f}원\n"
+        f"증권사 {broker} · {applicant}\n"
+        f"수익 {profit_amount:,.0f}원 ({profit_pct:+.1f}%, 수수료 {IPO_SELL_FEE:,}원 제외)"
+    )
     if lead_manager:
         reply += f"\n주간사 {lead_manager}"
     if expected_qty is not None and expected_qty != apply_qty:

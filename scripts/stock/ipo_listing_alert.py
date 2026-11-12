@@ -1,18 +1,26 @@
-"""공모주 상장일 매도 리마인더 — 상장 전날 저녁 20:00~20:30, 그리고 상장 당일 아침
-8시 30분부터(늦어도 반드시) 알린다.
+"""공모주 상장일 매도 리마인더 — 상장 전날, 그리고 상장 당일에 알린다.
 
-GitHub Actions cron이 평일 10분 간격으로 이 스크립트를 반복 호출하는 것을 전제로 한다
-(check_prices.py와 같은 패턴). "당일" 체크는 원래 08:20~08:40 20분짜리 좁은 창이었는데,
-GitHub Actions의 schedule 트리거가 정각 전후로 밀리거나(심하면 수십 분) 아예 스킵되는
-경우가 실제로 관측돼서(ipo_new_alert.py의 "마지막날" 알림에서 같은 문제로 몇 차례
-놓친 적 있음) — 사용자가 "상장일 아침 8시 30분에 알려달라"고 한 만큼, 08:30~09:50
-사이 하한만 확실히 두고 그 사이 아무 실행에서나 걸리면 보내도록 완화했다(워크플로우
-cron도 08시대뿐 아니라 09시대까지 한 시간 더 돌도록 슬롯을 추가해 이중 안전장치를 둠).
-"며칠에 한 번만" 판단은 공모주알람로그 탭으로 같은 날 중복 발송을 막는다.
+GitHub Actions cron에 "*/10"으로 10분 간격을 줘봤지만, 실제로는 GitHub가 빈번한
+schedule 트리거를 상당히 잡아먹어서(공식 문서가 말하는 정도를 훨씬 넘어서) 하루에
+실제로 도는 횟수가 3번 안팎에 불과하고, 그마저 지정한 cron 슬롯 시각과 거리가 먼
+임의 시각에 실행되는 경우가 흔하다 — 그래서 원래 08:30~09:50처럼 좁은 창을 뒀을 때,
+그날 실제로 돈 유일한 실행이 그 창을 그냥 벗어나버려서 "당일" 알림이 통째로 안 나간
+사고가 실제로 있었다(2026-10-20, 엘리스그룹). 좁은 시간창으로 "그날 아침에"를
+흉내내는 건 이 실행 빈도로는 신뢰할 수 없다고 판단해서, 창을 거의 하루 전체(당일은
+08:00~21:00, 전날은 12:00~23:59)로 넓혔다 — 어차피 "며칠에 한 번만" 판단은
+공모주알람로그 탭으로 같은 날 중복 발송을 막으니, 창을 넓혀도 같은 알림이 하루에
+여러 번 가지는 않는다.
 
 매도 리마인더에는 증권사와 함께 내가 청약한 공모가(청약가)도 같이 보여준다 — 실시간
 시초가 조회는 안 하고(실패/지연 위험, 사용자가 직접 비교 판단하길 선호) 이미 시트에
 있는 값을 그대로 쓴다.
+
+"배정받은 건 상장 당일에 꼭 팔아야 한다"는 핵심 지시는 "전날" 알림을 1차 채널로 삼는다
+— "당일" 알림도 남겨두지만(위에서 설명한 이유로 실행 자체가 늦게 돌 수 있어서), 그날
+장이 다 끝나갈 때쯔음에야 늦게 도착하면 실질적으로 매도 타이밍을 놓친 뒤라 의미가
+없어진다. 반면 "전날"은 하루 전체(12:00~23:59)가 창이라 실행이 늦어져도 다음날 아침
+장 시작 전까지 여유가 있다 — 그래서 "전날" 쪽 문구를 "꼭 매도하세요"로 단정적으로
+바꾸고, "당일"은 혹시 전날 알림을 놓쳤을 때를 위한 보조 확인용으로 남겨둔다.
 """
 
 from __future__ import annotations
@@ -55,8 +63,8 @@ def main() -> None:
     now_kst = dt.datetime.now(KST)
     today = now_kst.date().isoformat()
     tomorrow = (now_kst.date() + dt.timedelta(days=1)).isoformat()
-    in_morning_window = dt.time(8, 30) <= now_kst.time() <= dt.time(9, 50)
-    in_evening_window = dt.time(20, 0) <= now_kst.time() <= dt.time(20, 30)
+    in_morning_window = dt.time(8, 0) <= now_kst.time() <= dt.time(21, 0)
+    in_evening_window = dt.time(12, 0) <= now_kst.time() <= dt.time(23, 59)
 
     force_name, force_type = (None, None)
     if args.force_alert:
@@ -76,7 +84,7 @@ def main() -> None:
         try:
             price_label = f"{float(price):,.0f}원"
         except (ValueError, TypeError):
-            price_label = price or "미확인"
+            price_label = price or "미정"
 
         checks = []
         if force_name == name:
@@ -92,9 +100,15 @@ def main() -> None:
                 continue
 
             if alert_type == "전날":
-                text = f"⏰ 내일 {name} 상장! 매도 잊지 마세요\n{broker} · {applicant} · 청약가 {price_label}"
+                text = (
+                    f"⚠️ 내일 {name} 상장일입니다! 상장 당일 꼭 매도하세요\n"
+                    f"증권사 {broker or '미정'} · {applicant} · 청약가 {price_label}"
+                )
             else:
-                text = f"🔔 오늘 {name} 상장일! 지금 매도 확인하세요\n{broker} · {applicant} · 청약가 {price_label}"
+                text = (
+                    f"🔔 오늘 {name} 상장일! (전날 알림 못 보셨다면) 지금 바로 매도 확인하세요\n"
+                    f"증권사 {broker or '미정'} · {applicant} · 청약가 {price_label}"
+                )
 
             telegram_client.send_message(text)
             if not args.force_alert:

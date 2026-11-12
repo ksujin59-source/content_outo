@@ -1,20 +1,30 @@
 name: Calendar Daily Digest
 
-# 매일 아침 7시(KST)에 주식&공모주 기록 캘린더(STOCK_GOOGLE_CALENDAR_ID)에 그날 날짜로
-# 걸린 일정(매수/매도/청약/상장 기록 + 공모주 신규/확정/청약/상장 일정)을 모아 텔레그램
-# 으로 요약해서 보낸다.
+# 매일 아침 8시(KST) 전까지 주식&공모주 기록 캘린더(STOCK_GOOGLE_CALENDAR_ID)에 그날
+# 날짜로 걸린 일정(매수/매도/청약/상장 기록 + 공모주 신규/확정/청약/상장 일정)을 모아
+# 텔레그램으로 요약해서 보낸다.
 #
-# cron: "0 22 * * *" — UTC 22:00 = KST 07:00(다음날), 매일 1회.
+# 원래 cron 한 슬롯(KST 07:00)만 뒀었는데, GitHub Actions가 scheduled trigger를 꽤
+# 지연시켜서(이 저장소 다른 워크플로우들에서도 같은 문제가 관측됨) 하루 1회뿐인 실행이
+# 실제로는 10시경에야 돌아 알림이 늦게 간 적이 있었다. 그래서 KST 05:30~07:30 사이
+# 30분 간격 슬롯 5개로 재시도 기회를 늘려 8시 전 도착 확률을 높이고, 스크립트 쪽에서
+# "상태" 탭(calendar_digest_last_date)으로 그날 이미 보냈으면 건너뛰게 해 중복 발송을
+# 막는다(calendar_daily_digest.py 참고).
 #
 # 필요한 저장소 시크릿 (Settings > Secrets and variables > Actions):
 #   - STOCK_TELEGRAM_BOT_TOKEN
 #   - STOCK_TELEGRAM_CHAT_ID
 #   - GOOGLE_SERVICE_ACCOUNT_JSON
+#   - GOOGLE_SHEET_ID
 #   - STOCK_GOOGLE_CALENDAR_ID
 
 on:
   schedule:
+    - cron: "30 20 * * *"
+    - cron: "0 21 * * *"
+    - cron: "30 21 * * *"
     - cron: "0 22 * * *"
+    - cron: "30 22 * * *"
   workflow_dispatch:
 
 jobs:
@@ -37,5 +47,6 @@ jobs:
           STOCK_TELEGRAM_BOT_TOKEN: ${{ secrets.STOCK_TELEGRAM_BOT_TOKEN }}
           STOCK_TELEGRAM_CHAT_ID: ${{ secrets.STOCK_TELEGRAM_CHAT_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           STOCK_GOOGLE_CALENDAR_ID: ${{ secrets.STOCK_GOOGLE_CALENDAR_ID }}
         run: python scripts/stock/calendar_daily_digest.py

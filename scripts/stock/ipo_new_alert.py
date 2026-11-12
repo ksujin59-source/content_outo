@@ -11,14 +11,23 @@
   - 공모가확정: 확정공모가가 비어있다가 채워지는 순간
   - 일주일전: 오늘이 청약시작일 - 7일
   - 첫날: 오늘이 청약시작일 (cron이 평일 9/13/18시에 도므로 그날 첫 실행인 9시경에 나감).
-    이 알림엔 공모가(확정 전이면 희망범위)와 청약기간(시작~종료일) 전체를 같이 보여준다.
+    이 알림엔 공모가(확정 전이면 희망범위)와 청약기간(시작~종료일) 전체를 같이 보여주고,
+    기관경쟁률/의무보유확약비율/유통가능물량비율이 확인된 상태면 같이 보여준다(공모주
+    분석에 쓰는 핵심 지표 3종 — 수요예측이 끝나야 채워지므로 보통 첫날엔 이미 나와있다).
   - 마지막날: 오늘이 청약종료일이면서 KST 13:50 이후(처음엔 13:50~14:10 사이로만
     한정했었는데, GitHub Actions의 schedule 트리거가 정각 슬롯에서 수 분~수십 분씩
     밀리거나 통째로 스킵되는 일이 실제로 잦아서(2026-10-01엔 14:30, 10-02엔 14:18에야
     실행됨) 좁은 시간창을 매번 놓쳤다 — 하한만 두어, 14시 슬롯이 늦거나 아예 스킵돼도
     그날 이후 돌아가는 실행(예: 18시 슬롯)에서라도 반드시 나가도록 완화함)
 
-상장예정일이 아직 미확정(빈 값)인 기존 행은 매 실행마다 상세 페이지를 재조회해서 보강한다.
+상장예정일/환불일/기관경쟁률/의무보유확약비율/유통가능물량비율 중 아직 미확정(빈 값)인
+값이 있는 기존 행은 매 실행마다 상세 페이지를 재조회해서 보강한다.
+
+이미 추적 중인 종목의 청약기간(시작~종료일) 자체가 38.co.kr에서 바뀌는 경우도 있다(기업이
+청약을 연기하는 등) — no는 그대로인데 날짜만 갱신되는 패턴이라, 매 실행마다 최신으로
+다시 받아온 청약기간을 시트에 저장된 값과 비교해서 다르면 시트를 갱신하고 "청약일정
+변경" 알림을 보낸다(실제로 한 종목의 청약시작일이 변경된 걸 시트가 못 따라가서, 원래
+알고 있던 날짜가 "첫날"인 줄 알았는데 조용히 지나가버린 적이 있었다).
 
 신규/기존 모든 행에 대해 매 실행마다 "확인된 공모주 일정"을 STOCK_GOOGLE_CALENDAR_ID
 캘린더에도 동기화한다 — 이건 내가 청약/매도한 "행동" 기록(process_trades.py가 담당)이
@@ -65,6 +74,8 @@ def _next_iso(date_str: str) -> str:
 
 def _price_label(listing: ipo_calendar.IpoListing) -> str:
     price = listing.fixed_price if listing.fixed_price and listing.fixed_price != "-" else listing.price_range
+    if not price or price == "-":
+        return "미정"
     return f"{price}원"
 
 
@@ -165,9 +176,14 @@ def main() -> None:
 
     rows = ws_calendar.get_all_values()[1:]
     existing = {row[0]: idx for idx, row in enumerate(rows, start=2) if row}
+    existing_start = {row[0]: (row[2] if len(row) > 2 else "") for row in rows if row}
+    existing_end = {row[0]: (row[3] if len(row) > 3 else "") for row in rows if row}
     existing_listing_date = {row[0]: (row[7] if len(row) > 7 else "") for row in rows if row}
     existing_refund_date = {row[0]: (row[8] if len(row) > 8 else "") for row in rows if row}
     existing_price = {row[0]: (row[4] if len(row) > 4 else "") for row in rows if row}
+    existing_rate = {row[0]: (row[9] if len(row) > 9 else "") for row in rows if row}
+    existing_lockup = {row[0]: (row[10] if len(row) > 10 else "") for row in rows if row}
+    existing_float = {row[0]: (row[11] if len(row) > 11 else "") for row in rows if row}
 
     now_kst = dt.datetime.now(KST)
     today = now_kst.date().isoformat()
@@ -191,12 +207,15 @@ def main() -> None:
                 listing.lead_manager,
                 listing_date_iso,
                 refund_date_iso,
+                detail["institutional_rate"],
+                detail["lockup_ratio"],
+                detail["float_ratio"],
             ])
             telegram_client.send_message(
                 f"🆕 새 공모주: {listing.name}\n"
                 f"청약 {listing.subscribe_start}~{listing.subscribe_end[5:]}\n"
-                f"희망공모가 {listing.price_range}원\n"
-                f"주간사 {listing.lead_manager}"
+                f"공모가 {_price_label(listing)}\n"
+                f"증권사(주간사) {listing.lead_manager or '미정'}"
             )
             _sync_calendar(stock_calendar_id, listing, listing_date_iso, refund_date_iso)
             _sync_holding_events(ws_apply, stock_calendar_id, listing.name, listing_date_iso, refund_date_iso)
@@ -206,28 +225,47 @@ def main() -> None:
         row_idx = existing[listing.no]
         listing_date_iso = existing_listing_date.get(listing.no, "")
         refund_date_iso = existing_refund_date.get(listing.no, "")
+        institutional_rate = existing_rate.get(listing.no, "")
+        lockup_ratio = existing_lockup.get(listing.no, "")
+        float_ratio = existing_float.get(listing.no, "")
 
         if not existing_price.get(listing.no) and listing.fixed_price:
             ws_calendar.update(f"E{row_idx}", [[listing.fixed_price]])
             _send_alert(
                 ws_alarm_log, today, now_kst, listing.name, "공모가확정",
-                f"💰 {listing.name} 공모가 확정: {listing.fixed_price}원 (주간사 {listing.lead_manager})",
+                f"💰 {listing.name} 공모가 확정: {listing.fixed_price}원 (증권사(주간사) {listing.lead_manager or '미정'})",
             )
 
-        if not listing_date_iso:
+        start_iso = _to_iso(listing.subscribe_start)
+        end_iso = _to_iso(listing.subscribe_end)
+        old_start = existing_start.get(listing.no, "")
+        old_end = existing_end.get(listing.no, "")
+        if start_iso and old_start and (start_iso != old_start or end_iso != old_end):
+            ws_calendar.update(f"C{row_idx}:D{row_idx}", [[start_iso, end_iso]])
+            telegram_client.send_message(
+                f"⏰ {listing.name} 청약일정 변경: {old_start}~{old_end} → {start_iso}~{end_iso}\n"
+                f"공모가 {_price_label(listing)} · 증권사(주간사) {listing.lead_manager or '미정'}"
+            )
+
+        if not listing_date_iso or not institutional_rate or not lockup_ratio or not float_ratio:
             detail = ipo_calendar.fetch_detail(listing.no)
-            if detail["listing_date"]:
+            if not listing_date_iso and detail["listing_date"]:
                 listing_date_iso = _to_iso(detail["listing_date"])
                 refund_date_iso = _to_iso(detail["refund_date"])
-                ws_calendar.update(f"H{row_idx}:I{row_idx}", [[
-                    listing_date_iso, refund_date_iso,
-                ]])
+                ws_calendar.update(f"H{row_idx}:I{row_idx}", [[listing_date_iso, refund_date_iso]])
+            if not institutional_rate and detail["institutional_rate"]:
+                institutional_rate = detail["institutional_rate"]
+                ws_calendar.update(f"J{row_idx}", [[institutional_rate]])
+            if not lockup_ratio and detail["lockup_ratio"]:
+                lockup_ratio = detail["lockup_ratio"]
+                ws_calendar.update(f"K{row_idx}", [[lockup_ratio]])
+            if not float_ratio and detail["float_ratio"]:
+                float_ratio = detail["float_ratio"]
+                ws_calendar.update(f"L{row_idx}", [[float_ratio]])
 
         _sync_calendar(stock_calendar_id, listing, listing_date_iso, refund_date_iso)
         _sync_holding_events(ws_apply, stock_calendar_id, listing.name, listing_date_iso, refund_date_iso)
 
-        start_iso = _to_iso(listing.subscribe_start)
-        end_iso = _to_iso(listing.subscribe_end)
         week_before_iso = (
             (dt.date.fromisoformat(start_iso) - dt.timedelta(days=7)).isoformat() if start_iso else ""
         )
@@ -235,22 +273,30 @@ def main() -> None:
         if week_before_iso and today == week_before_iso:
             _send_alert(
                 ws_alarm_log, today, now_kst, listing.name, "일주일전",
-                f"📅 {listing.name} 청약 일주일 전! 청약 {listing.subscribe_start}~{listing.subscribe_end[5:]}"
-                f" (주간사 {listing.lead_manager})",
+                f"📅 {listing.name} 청약 일주일 전! 청약 {listing.subscribe_start}~{listing.subscribe_end[5:]}\n"
+                f"공모가 {_price_label(listing)} (증권사(주간사) {listing.lead_manager or '미정'})",
             )
 
         if start_iso and today == start_iso:
+            analysis_bits = []
+            if institutional_rate:
+                analysis_bits.append(f"기관경쟁률 {institutional_rate}")
+            if lockup_ratio:
+                analysis_bits.append(f"의무보유확약 {lockup_ratio}")
+            if float_ratio:
+                analysis_bits.append(f"유통가능물량 {float_ratio}")
+            analysis_text = ("\n" + " · ".join(analysis_bits)) if analysis_bits else ""
             _send_alert(
                 ws_alarm_log, today, now_kst, listing.name, "첫날",
                 f"🔔 {listing.name} 청약 첫날입니다! 청약기간 {listing.subscribe_start}~{listing.subscribe_end[5:]}\n"
-                f"공모가 {_price_label(listing)} (주간사 {listing.lead_manager})",
+                f"공모가 {_price_label(listing)} (증권사(주간사) {listing.lead_manager or '미정'}){analysis_text}",
             )
 
         if end_iso and today == end_iso and afternoon_or_later:
             _send_alert(
                 ws_alarm_log, today, now_kst, listing.name, "마지막날",
-                f"⏰ {listing.name} 청약 마지막날입니다! 오늘까지만 청약 가능"
-                f" (주간사 {listing.lead_manager})",
+                f"⏰ {listing.name} 청약 마지막날입니다! 오늘까지만 청약 가능\n"
+                f"공모가 {_price_label(listing)} (증권사(주간사) {listing.lead_manager or '미정'})",
             )
 
     # 38.co.kr의 "현재 청약중" 목록은 청약종료일이 지나면 그 종목을 더 이상 보여주지
@@ -271,8 +317,11 @@ def main() -> None:
         lead_manager = row[6] if len(row) > 6 else ""
         listing_date_iso = row[7] if len(row) > 7 else ""
         refund_date_iso = row[8] if len(row) > 8 else ""
+        institutional_rate = row[9] if len(row) > 9 else ""
+        lockup_ratio = row[10] if len(row) > 10 else ""
+        float_ratio = row[11] if len(row) > 11 else ""
 
-        if not listing_date_iso or not refund_date_iso:
+        if not listing_date_iso or not refund_date_iso or not institutional_rate or not lockup_ratio or not float_ratio:
             detail = ipo_calendar.fetch_detail(no)
             if not listing_date_iso and detail["listing_date"]:
                 listing_date_iso = _to_iso(detail["listing_date"])
@@ -280,6 +329,15 @@ def main() -> None:
             if not refund_date_iso and detail["refund_date"]:
                 refund_date_iso = _to_iso(detail["refund_date"])
                 ws_calendar.update(f"I{existing[no]}", [[refund_date_iso]])
+            if not institutional_rate and detail["institutional_rate"]:
+                institutional_rate = detail["institutional_rate"]
+                ws_calendar.update(f"J{existing[no]}", [[institutional_rate]])
+            if not lockup_ratio and detail["lockup_ratio"]:
+                lockup_ratio = detail["lockup_ratio"]
+                ws_calendar.update(f"K{existing[no]}", [[lockup_ratio]])
+            if not float_ratio and detail["float_ratio"]:
+                float_ratio = detail["float_ratio"]
+                ws_calendar.update(f"L{existing[no]}", [[float_ratio]])
 
         if not listing_date_iso and not refund_date_iso:
             continue
