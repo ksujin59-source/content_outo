@@ -31,15 +31,18 @@ KST = zoneinfo.ZoneInfo("Asia/Seoul")
 
 
 def _force_sync_holding(
-    ws_apply, stock_calendar_id: str, name: str, listing_date_iso: str, refund_date_iso: str,
+    ws_apply, apply_rows, stock_calendar_id: str, name: str, listing_date_iso: str, refund_date_iso: str,
 ) -> None:
     """ipo_new_alert.py의 _sync_holding_events와 같은 매칭 로직이지만, 상장예정일이
     이미 채워져 있어도(바뀌었다면) 덮어쓴다 — 여기선 "비어있을 때만 채우기"가 아니라
-    "바뀌었으면 고치기"가 목적이기 때문."""
+    "바뀌었으면 고치기"가 목적이기 때문.
+
+    apply_rows는 main()에서 한 번만 읽어온 공모주신청 행을 그대로 받는다 — 종목마다
+    이 함수를 호출하면서 매번 새로 읽으면 추적 종목 수만큼 시트 읽기 요청이 쌓여서
+    구글시트 API 분당 할당량(429 Quota exceeded)을 건드렸다(2026-11-12, 실제 발생)."""
     if not stock_calendar_id or not (listing_date_iso or refund_date_iso):
         return
-    rows = ws_apply.get_all_values()[1:]
-    for idx, row in enumerate(rows, start=2):
+    for idx, row in enumerate(apply_rows, start=2):
         if len(row) < 8 or row[7] != "대기":
             continue
         row_name = row[1]
@@ -74,6 +77,7 @@ def main() -> None:
     spreadsheet = sheets_client.get_spreadsheet()
     ws_calendar = sheets_client.get_or_create_worksheet(spreadsheet, "공모주캘린더")
     ws_apply = sheets_client.get_or_create_worksheet(spreadsheet, "공모주신청")
+    apply_rows = ws_apply.get_all_values()[1:]
 
     today = dt.datetime.now(KST).date().isoformat()
     rows = ws_calendar.get_all_values()[1:]
@@ -124,7 +128,7 @@ def main() -> None:
                 stock_calendar_id, f"iporefunddate{no}", f"[환불일] {name} · {lead_manager}",
                 refund_date_iso, _next_iso(refund_date_iso),
             )
-        _force_sync_holding(ws_apply, stock_calendar_id, name, listing_date_iso, refund_date_iso)
+        _force_sync_holding(ws_apply, apply_rows, stock_calendar_id, name, listing_date_iso, refund_date_iso)
 
     print(f"재확인 {checked}건, 변경 {changed}건.")
 

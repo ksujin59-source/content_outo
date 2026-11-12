@@ -110,7 +110,7 @@ def _sync_calendar(
 
 
 def _sync_holding_events(
-    ws_apply, stock_calendar_id: str, name: str, listing_date_iso: str, refund_date_iso: str,
+    ws_apply, apply_rows, stock_calendar_id: str, name: str, listing_date_iso: str, refund_date_iso: str,
 ) -> None:
     """상장예정일/환불일이 확인된 종목으로 대기중인 내 신청 건이 있으면 "상장일 보유
     현황"/"환불일" 이벤트를 미리 띄운다(아직 매도 전이라 청약가 기준) — 청약 시점엔
@@ -119,11 +119,16 @@ def _sync_holding_events(
     공모주신청 탭의 상장예정일(G열) 자체도 비어있으면 같이 채운다 — ipo_listing_alert.py
     (상장 전날/당일 매도 리마인더)가 이 칸만 보고 판단하는데, 청약 시점에 상장예정일을
     몰랐으면 이 칸이 영원히 빈 채로 남아 "당일 아침 8시" 알림이 영영 안 나가는 문제가
-    있었다 — 여기서 채워줘야 그 알림이 걸릴 기회가 생긴다."""
+    있었다 — 여기서 채워줘야 그 알림이 걸릴 기회가 생긴다.
+
+    apply_rows는 main()에서 딱 한 번 읽어온 공모주신청 전체 행을 그대로 받는다 — 이
+    함수가 종목(listing)마다 한 번씩 호출되는데, 매번 ws_apply.get_all_values()를 새로
+    부르면 추적 종목이 수십 개일 때 시트 읽기 요청이 수십 번 쌓여서 구글시트 API
+    분당 할당량(429 Quota exceeded)을 건드렸다(2026-11-12, 실제 발생) — 그래서 읽기는
+    main()에서 한 번만 하고 여기엔 결과만 넘긴다(쓰기는 그대로 ws_apply로)."""
     if not stock_calendar_id or not (listing_date_iso or refund_date_iso):
         return
-    rows = ws_apply.get_all_values()[1:]
-    for idx, row in enumerate(rows, start=2):
+    for idx, row in enumerate(apply_rows, start=2):
         if len(row) < 8 or row[7] != "대기":
             continue
         row_name = row[1]
@@ -173,6 +178,7 @@ def main() -> None:
     ws_calendar = sheets_client.get_or_create_worksheet(spreadsheet, "공모주캘린더")
     ws_alarm_log = sheets_client.get_or_create_worksheet(spreadsheet, "공모주알람로그")
     ws_apply = sheets_client.get_or_create_worksheet(spreadsheet, "공모주신청")
+    apply_rows = ws_apply.get_all_values()[1:]
 
     rows = ws_calendar.get_all_values()[1:]
     existing = {row[0]: idx for idx, row in enumerate(rows, start=2) if row}
@@ -218,7 +224,7 @@ def main() -> None:
                 f"증권사(주간사) {listing.lead_manager or '미정'}"
             )
             _sync_calendar(stock_calendar_id, listing, listing_date_iso, refund_date_iso)
-            _sync_holding_events(ws_apply, stock_calendar_id, listing.name, listing_date_iso, refund_date_iso)
+            _sync_holding_events(ws_apply, apply_rows, stock_calendar_id, listing.name, listing_date_iso, refund_date_iso)
             new_count += 1
             continue
 
@@ -264,7 +270,7 @@ def main() -> None:
                 ws_calendar.update(f"L{row_idx}", [[float_ratio]])
 
         _sync_calendar(stock_calendar_id, listing, listing_date_iso, refund_date_iso)
-        _sync_holding_events(ws_apply, stock_calendar_id, listing.name, listing_date_iso, refund_date_iso)
+        _sync_holding_events(ws_apply, apply_rows, stock_calendar_id, listing.name, listing_date_iso, refund_date_iso)
 
         week_before_iso = (
             (dt.date.fromisoformat(start_iso) - dt.timedelta(days=7)).isoformat() if start_iso else ""
@@ -351,7 +357,7 @@ def main() -> None:
                 stock_calendar_id, f"iporefunddate{no}", f"[환불일] {name} · {lead_manager}",
                 refund_date_iso, _next_iso(refund_date_iso),
             )
-        _sync_holding_events(ws_apply, stock_calendar_id, name, listing_date_iso, refund_date_iso)
+        _sync_holding_events(ws_apply, apply_rows, stock_calendar_id, name, listing_date_iso, refund_date_iso)
 
     print(f"신규 {new_count}건, 총 {len(listings)}건 확인.")
 
