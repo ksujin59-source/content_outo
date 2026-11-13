@@ -79,6 +79,95 @@ def _price_label(listing: ipo_calendar.IpoListing) -> str:
     return f"{price}원"
 
 
+# 청약 신호등 기준 — 국내 공모주에서 흔히 보는 경험칙. 숫자만 바꾸면 기준이 바뀐다.
+RATE_GOOD, RATE_BAD, RATE_FLOOR = 1000.0, 500.0, 100.0   # 기관경쟁률(:1)
+LOCKUP_GOOD, LOCKUP_BAD = 15.0, 5.0                       # 의무보유확약(%) — 높을수록 좋음
+FLOAT_GOOD, FLOAT_BAD = 25.0, 40.0                        # 유통가능물량(%) — 낮을수록 좋음
+
+
+def _num(text: str) -> float | None:
+    """'1,234.56:1' / '18.5%' / '12,000' 같은 값에서 맨 앞 숫자만 뽑는다."""
+    if not text:
+        return None
+    head = text.replace(",", "").split(":")[0].replace("%", "").strip()
+    try:
+        return float(head)
+    except ValueError:
+        return None
+
+
+def _grade(
+    institutional_rate: str, lockup_ratio: str, float_ratio: str, fixed_price: str = "", price_range: str = "",
+) -> str:
+    """청약할 만한지 신호등으로 알려주는 한두 줄 텍스트를 만든다.
+
+    🔴 빨간불 = 청약 추천, 🟡 노란불 = 보통(소액/균등만), 🔵 파란불 = 비추천
+    (주식 시세 색 관례: 빨강=좋음, 파랑=나쁨 — 메시지에 뜻을 같이 적어서 헷갈리지 않게 함).
+
+    각 지표가 좋으면 +1, 나쁘면 -1로 점수를 매긴다. 기관경쟁률이 가장 중요한 지표라
+    이게 없으면(수요예측 전) 판단을 보류하고, 100:1 미만이면 다른 지표와 무관하게 파란불.
+    투자 판단 보조용일 뿐이니 최종 결정은 직접 한다."""
+    rate = _num(institutional_rate)
+    if rate is None:
+        return "⚪ 신호등: 판단 보류 (수요예측 결과 전)"
+
+    score = 0
+    reasons = []
+
+    if rate >= RATE_GOOD:
+        score += 1
+        reasons.append(f"기관경쟁률 {institutional_rate} 높음")
+    elif rate < RATE_BAD:
+        score -= 1
+        reasons.append(f"기관경쟁률 {institutional_rate} 낮음")
+    else:
+        reasons.append(f"기관경쟁률 {institutional_rate} 보통")
+
+    lockup = _num(lockup_ratio)
+    if lockup is not None:
+        if lockup >= LOCKUP_GOOD:
+            score += 1
+            reasons.append(f"확약 {lockup_ratio} 높음")
+        elif lockup < LOCKUP_BAD:
+            score -= 1
+            reasons.append(f"확약 {lockup_ratio} 낮음")
+        else:
+            reasons.append(f"확약 {lockup_ratio} 보통")
+
+    float_pct = _num(float_ratio)
+    if float_pct is not None:
+        if float_pct <= FLOAT_GOOD:
+            score += 1
+            reasons.append(f"유통물량 {float_ratio} 적음")
+        elif float_pct > FLOAT_BAD:
+            score -= 1
+            reasons.append(f"유통물량 {float_ratio} 많음")
+        else:
+            reasons.append(f"유통물량 {float_ratio} 보통")
+
+    fixed = _num(fixed_price) if fixed_price and fixed_price != "-" else None
+    band = [_num(p) for p in price_range.split("~")] if price_range and "~" in price_range else []
+    if fixed is not None and len(band) == 2 and None not in band:
+        low, high = band
+        if fixed > high:
+            score += 1
+            reasons.append("공모가 상단 초과")
+        elif fixed == high:
+            score += 1
+            reasons.append("공모가 상단")
+        elif fixed < low:
+            score -= 1
+            reasons.append("공모가 하단 미만")
+
+    if rate < RATE_FLOOR or score <= -1:
+        light = "🔵 파란불: 비추천"
+    elif score >= 2 and rate >= RATE_BAD:
+        light = "🔴 빨간불: 청약 추천"
+    else:
+        light = "🟡 노란불: 보통 (소액·균등만)"
+    return f"{light}\n근거: " + " · ".join(reasons)
+
+
 def _sync_calendar(
     stock_calendar_id: str, listing: ipo_calendar.IpoListing, listing_date_iso: str, refund_date_iso: str,
 ) -> None:
@@ -221,7 +310,11 @@ def main() -> None:
                 f"🆕 새 공모주: {listing.name}\n"
                 f"청약 {listing.subscribe_start}~{listing.subscribe_end[5:]}\n"
                 f"공모가 {_price_label(listing)}\n"
-                f"증권사(주간사) {listing.lead_manager or '미정'}"
+                f"증권사(주간사) {listing.lead_manager or '미정'}\n"
+                + _grade(
+                    detail["institutional_rate"], detail["lockup_ratio"], detail["float_ratio"],
+                    listing.fixed_price, listing.price_range,
+                )
             )
             _sync_calendar(stock_calendar_id, listing, listing_date_iso, refund_date_iso)
             _sync_holding_events(ws_apply, apply_rows, stock_calendar_id, listing.name, listing_date_iso, refund_date_iso)
@@ -283,26 +376,22 @@ def main() -> None:
                 f"공모가 {_price_label(listing)} (증권사(주간사) {listing.lead_manager or '미정'})",
             )
 
+        grade_text = "\n" + _grade(
+            institutional_rate, lockup_ratio, float_ratio, listing.fixed_price, listing.price_range,
+        )
+
         if start_iso and today == start_iso:
-            analysis_bits = []
-            if institutional_rate:
-                analysis_bits.append(f"기관경쟁률 {institutional_rate}")
-            if lockup_ratio:
-                analysis_bits.append(f"의무보유확약 {lockup_ratio}")
-            if float_ratio:
-                analysis_bits.append(f"유통가능물량 {float_ratio}")
-            analysis_text = ("\n" + " · ".join(analysis_bits)) if analysis_bits else ""
             _send_alert(
                 ws_alarm_log, today, now_kst, listing.name, "첫날",
                 f"🔔 {listing.name} 청약 첫날입니다! 청약기간 {listing.subscribe_start}~{listing.subscribe_end[5:]}\n"
-                f"공모가 {_price_label(listing)} (증권사(주간사) {listing.lead_manager or '미정'}){analysis_text}",
+                f"공모가 {_price_label(listing)} (증권사(주간사) {listing.lead_manager or '미정'}){grade_text}",
             )
 
         if end_iso and today == end_iso and afternoon_or_later:
             _send_alert(
                 ws_alarm_log, today, now_kst, listing.name, "마지막날",
                 f"⏰ {listing.name} 청약 마지막날입니다! 오늘까지만 청약 가능\n"
-                f"공모가 {_price_label(listing)} (증권사(주간사) {listing.lead_manager or '미정'})",
+                f"공모가 {_price_label(listing)} (증권사(주간사) {listing.lead_manager or '미정'}){grade_text}",
             )
 
     # 38.co.kr의 "현재 청약중" 목록은 청약종료일이 지나면 그 종목을 더 이상 보여주지
